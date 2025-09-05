@@ -11,27 +11,60 @@ import socketio
 import uvicorn
 import numpy as np
 from audio_hander import ASRWsAudioHandler
+from config import ASR_SERVER_CONFIG, WEB_SERVER_CONFIG, SOCKETIO_CONFIG, SOCKETIO_PATH
 
 # 创建 FastAPI 应用
 app = FastAPI()
-sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
-socket_app = socketio.ASGIApp(sio, app)
+sio = socketio.AsyncServer(
+    async_mode=SOCKETIO_CONFIG["async_mode"],
+    cors_allowed_origins=SOCKETIO_CONFIG["cors_allowed_origins"],
+)
+socket_app = socketio.ASGIApp(sio, app, socketio_path=SOCKETIO_PATH)
 
 # 设置静态文件和模板
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def read_root(request: Request):
+    """主页 - 提供Socket.IO测试界面"""
+    # 将Socket.IO路径传递给模板
+    return templates.TemplateResponse(
+        "index.html", 
+        {
+            "request": request, 
+            "socketio_path": SOCKETIO_PATH,
+            "server_host": WEB_SERVER_CONFIG["host"],
+            "server_port": WEB_SERVER_CONFIG["port"]
+        }
+    )
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查端点"""
+    return {"status": "healthy", "socketio_path": SOCKETIO_PATH}
+
 
 # 全局变量存储ASR处理器和音频处理器
 asr_sessions = {}
 
 
 class WebASRSession:
-    def __init__(self, session_id, asr_server_ip="127.0.0.1", asr_server_port=8090):
+    def __init__(
+        self, session_id, asr_server_ip=None, asr_server_port=None, endpoint=None
+    ):
         self.session_id = session_id
+        # 使用配置文件中的默认值
+        self.asr_server_ip = asr_server_ip or ASR_SERVER_CONFIG["default_ip"]
+        self.asr_server_port = asr_server_port or ASR_SERVER_CONFIG["default_port"]
+        self.endpoint = endpoint or ASR_SERVER_CONFIG["endpoint"]
+
         self.asr_handler = ASRWsAudioHandler(
-            url=asr_server_ip,
-            port=asr_server_port,
-            endpoint="/paddlespeech/asr/streaming",
+            url=self.asr_server_ip,
+            port=self.asr_server_port,
+            endpoint=self.endpoint,
         )
         self.web_audio_handler = self.asr_handler.create_web_audio_handler()
         self.is_processing = False
@@ -122,13 +155,6 @@ class WebASRSession:
         if self.web_audio_handler:
             self.web_audio_handler.stop()
 
-
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    """首页"""
-    return templates.TemplateResponse("index.html", {"request": request})
-
-
 @sio.event
 async def connect(sid, environ):
     """客户端连接"""
@@ -152,8 +178,12 @@ async def start_asr(sid):
     """开始ASR处理"""
     print(f"Starting ASR for session: {sid}")
 
+    # 从客户端数据中获取服务器配置，如果没有则使用默认配置
+    server_ip = None
+    server_port = None
+
     # 创建新的ASR会话
-    asr_session = WebASRSession(sid, "127.0.0.1", 8090)
+    asr_session = WebASRSession(sid, server_ip, server_port)
     asr_sessions[sid] = asr_session
 
     # 开始ASR处理
@@ -202,5 +232,10 @@ async def stop_asr(sid):
 
 if __name__ == "__main__":
     print("Starting Web ASR Server...")
-    print("Open http://localhost:8000 in your browser")
-    uvicorn.run(socket_app, host="0.0.0.0", port=8000, reload=True)
+    print(f"Open http://localhost:{WEB_SERVER_CONFIG['port']} in your browser")
+    uvicorn.run(
+        socket_app,
+        host=WEB_SERVER_CONFIG["host"],
+        port=WEB_SERVER_CONFIG["port"],
+        reload=WEB_SERVER_CONFIG["reload"],
+    )

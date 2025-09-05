@@ -39,9 +39,6 @@ if __name__ == "__main__":
     try:
         import uvicorn
         from web_server import socket_app
-        print("=" * 50)
-        print("🎤 StreamASR Web服务器启动中...")
-        print("=" * 50)
         print("请确保PaddleSpeech ASR服务器已启动:")
         print("默认地址: ws://127.0.0.1:8090/paddlespeech/asr/streaming")
         print("")
