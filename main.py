@@ -15,8 +15,27 @@ python -c "from paddlespeech_client import ASROnlineClientExecutor; print(ASROnl
 import sys
 import os
 
-def run_web_server():
-    """启动Web服务器"""
+
+def run_mic_mode():
+    """运行原始麦克风模式"""
+    from paddlespeech_client import ASROnlineClientExecutor
+    
+    print("=" * 50)
+    print("🎤 StreamASR 麦克风模式")
+    print("=" * 50)
+    
+    asrclient_executor = ASROnlineClientExecutor()
+    res = asrclient_executor(
+        input="mic",
+        server_ip="127.0.0.1",
+        port=8090,
+        # punc_server_ip="127.0.0.1",
+        # punc_server_port=8190,
+    )
+    print(f"识别结果: {res}")
+
+
+if __name__ == "__main__":
     try:
         import uvicorn
         from web_server import socket_app
@@ -38,29 +57,3 @@ def run_web_server():
     except Exception as e:
         print(f"启动Web服务器失败: {e}")
         sys.exit(1)
-
-def run_mic_mode():
-    """运行原始麦克风模式"""
-    from paddlespeech_client import ASROnlineClientExecutor
-    
-    print("=" * 50)
-    print("🎤 StreamASR 麦克风模式")
-    print("=" * 50)
-    
-    asrclient_executor = ASROnlineClientExecutor()
-    res = asrclient_executor(
-        input="mic",
-        server_ip="127.0.0.1",
-        port=8090,
-        # punc_server_ip="127.0.0.1",
-        # punc_server_port=8190,
-    )
-    print(f"识别结果: {res}")
-
-if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--mic":
-        # 麦克风模式
-        run_mic_mode()
-    else:
-        # Web服务器模式 (默认)
-        run_web_server()

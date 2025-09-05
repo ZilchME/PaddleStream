@@ -182,15 +182,11 @@ class ASRWsAudioHandler:
         self.punc_server = TextHttpHandler(punc_server_ip, punc_server_port)
         print(f"endpoint: {self.url}")
 
-    def read_microphone(self):
-        mic = MicrophoneHandler(sample_rate=16000)
-        mic.start()
-        print("麦克风已启动，按Enter键停止录音...")
-        return mic
 
     def create_web_audio_handler(self):
         """创建Web音频处理器"""
         return WebAudioHandler(sample_rate=16000)
+    
 
     async def run_web_audio(self, web_audio_handler, real_time_callback=None):
         """处理来自Web的音频流
@@ -204,6 +200,7 @@ class ASRWsAudioHandler:
             return ""
 
         start_time = time.time()
+        # ws: 飞桨语音识别后端WebSocket连接
         async with websockets.connect(self.url) as ws:
             # 发送开始信号
             audio_info = json.dumps(
@@ -225,10 +222,10 @@ class ASRWsAudioHandler:
             print("开始处理Web音频流...")
 
             # 用于检测静音的变量
+            # TODO: 可以改进为基于音频能量的静音检测
             last_result = None
             last_result_time = None
             silence_timeout = 3  # 3秒
-            final_result = ""
 
             # 处理音频数据
             for chunk_data in web_audio_handler.read_audio_stream():
@@ -244,8 +241,6 @@ class ASRWsAudioHandler:
                     print("client receive msg={}".format(msg))
 
                     if current_result:
-                        final_result = current_result
-                        
                         # 发送实时结果到前端
                         if real_time_callback:
                             real_time_callback(current_result, msg.get("type", "partial"))
@@ -284,111 +279,6 @@ class ASRWsAudioHandler:
             # 停止音频处理器
             web_audio_handler.stop()
 
-            # 添加标点
-            if self.punc_server and len(msg["result"]) > 0:
-                msg["result"] = self.punc_server.run(msg["result"])
-
-            # 计算处理时间
-            elapsed_time = time.time() - start_time
-            print(f"elapsed time: {elapsed_time}")
-            print(f"final result: {msg['result']}")
-
-            return msg
-
-
-    async def run_mic(self):
-        if self.url is None:
-            print("No asr server, please input valid ip and port")
-            return ""
-
-        # 建立WebSocket连接
-        start_time = time.time()
-        async with websockets.connect(self.url) as ws:
-            # 发送开始信号
-            audio_info = json.dumps(
-                {
-                    "name": "live_audio",
-                    "signal": "start",
-                    "nbest": 1,
-                },
-                sort_keys=True,
-                indent=4,
-                separators=(",", ": "),
-            )
-            await ws.send(audio_info)
-            msg = await ws.recv()
-            print(f"server: {msg}")
-
-            # 创建停止标志
-            stop_event = threading.Event()
-
-            # 如果是麦克风输入，启动键盘监听线程
-            def wait_for_enter():
-                input("")  # 等待用户按回车
-                stop_event.set()
-
-            threading.Thread(target=wait_for_enter, daemon=True).start()
-
-            # 发送音频数据
-            # 启动麦克风或读取音频文件
-            mic_handler = self.read_microphone()
-            input_gen = mic_handler.read_microphone
-            print("请开始说话...")
-
-            # 用于检测静音的变量
-            last_result = None
-            last_result_time = None
-            silence_timeout = 3  # 3秒
-
-            for chunk_data in input_gen():
-                if stop_event.is_set():
-                    break
-
-                # 处理麦克风数据块
-                chunk_data = chunk_data.astype(np.int16)
-                await ws.send(chunk_data.tobytes())
-
-                # 非阻塞接收消息
-                try:
-                    msg = await asyncio.wait_for(ws.recv(), timeout=0.1)
-                    msg = json.loads(msg)
-                    current_result = msg.get("result", "")
-                    print("client receive msg={}".format(msg))
-
-                    # 检查结果是否与上次相同
-                    if current_result and current_result == last_result:
-                        if last_result_time is None:
-                            last_result_time = time.time()
-                        elif time.time() - last_result_time >= silence_timeout:
-                            print(
-                                f"No speech detected for {silence_timeout} seconds, closing connection."
-                            )
-                            stop_event.set()
-                            break
-                    else:
-                        last_result = current_result
-                        last_result_time = None
-
-                except asyncio.TimeoutError:
-                    continue
-
-            # 发送结束信号
-            audio_info = json.dumps(
-                {
-                    "name": "live_audio",
-                    "signal": "end",
-                    "nbest": 1,
-                },
-                sort_keys=True,
-                indent=4,
-                separators=(",", ": "),
-            )
-            await ws.send(audio_info)
-            msg = await ws.recv()
-            msg = json.loads(msg)
-
-            # 停止麦克风
-            mic_handler.stop()
             # 添加标点
             if self.punc_server and len(msg["result"]) > 0:
                 msg["result"] = self.punc_server.run(msg["result"])
