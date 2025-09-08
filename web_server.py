@@ -92,6 +92,10 @@ class TTSBufferSession:
         self.synthesis_thread = None
         self.stop_synthesis = False
         
+        # 合成锁将在工作线程中创建
+        self.synthesis_lock = None
+        self.current_synthesizing_sentence = None
+        
         # 回调函数
         self.stream_callback: Optional[Callable] = None
         
@@ -203,6 +207,9 @@ class TTSBufferSession:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
+        # 在工作线程中创建异步锁
+        self.synthesis_lock = asyncio.Lock()
+        
         try:
             loop.run_until_complete(self._synthesis_loop())
         except Exception as e:
@@ -219,15 +226,26 @@ class TTSBufferSession:
                 sentence = self.pending_sentences.get(timeout=1.0)
                 
                 if sentence and not self.stop_synthesis:
-                    # 执行TTS合成
-                    await self._synthesize_sentence(sentence)
-                    self.processed_sentences += 1
+                    # 使用锁确保同一时间只有一个句子在合成
+                    async with self.synthesis_lock:
+                        if not self.stop_synthesis:  # 再次检查，避免在等待锁期间被停止
+                            self.current_synthesizing_sentence = sentence
+                            print(f"开始合成句子 {self.processed_sentences + 1}: {sentence[:50]}...")
+                            
+                            # 执行TTS合成
+                            await self._synthesize_sentence(sentence)
+                            self.processed_sentences += 1
+                            
+                            self.current_synthesizing_sentence = None
+                            print(f"完成合成句子 {self.processed_sentences}: {sentence[:50]}...")
                     
             except Empty:
                 # 队列为空，继续等待
                 continue
             except Exception as e:
                 print(f"Error in synthesis loop: {e}")
+                # 发生错误时也要清除当前合成状态
+                self.current_synthesizing_sentence = None
                 
     async def _synthesize_sentence(self, sentence: str):
         """合成单个句子"""
@@ -238,19 +256,22 @@ class TTSBufferSession:
                     # 添加句子信息到chunk数据
                     chunk_data["sentence"] = sentence
                     chunk_data["total_sentences"] = self.total_sentences
-                    chunk_data["processed_sentences"] = self.processed_sentences
+                    chunk_data["processed_sentences"] = self.processed_sentences + 1  # +1 因为当前句子正在处理
+                    chunk_data["current_sentence_index"] = self.processed_sentences + 1
                     await self.stream_callback(chunk_data)
                     
-            # 使用TTS执行器合成句子
+            # 使用统一的TTS会话ID，而不是为每个句子创建新的会话
+            # 这样可以更好地控制并发，避免多个会话同时合成
             result = await tts_executor.synthesize_text(
-                session_id=f"{self.session_id}_sentence_{self.processed_sentences}",
+                session_id=self.session_id,  # 使用统一的会话ID
                 text=sentence,
                 spk_id=self.spk_id,
                 stream_callback=sentence_stream_callback
             )
             
-            print(f"Synthesized sentence {self.processed_sentences}: {sentence[:50]}...")
-            
+            if result["status"] != "completed":
+                print(f"句子合成失败: {sentence[:50]}... - {result}")
+                
         except Exception as e:
             print(f"Error synthesizing sentence '{sentence[:50]}...': {e}")
             
@@ -258,6 +279,7 @@ class TTSBufferSession:
         """停止合成处理"""
         self.stop_synthesis = True
         self.is_processing = False
+        self.current_synthesizing_sentence = None
         
         # 清空队列
         while not self.pending_sentences.empty():
@@ -274,7 +296,8 @@ class TTSBufferSession:
             "pending_sentences": self.pending_sentences.qsize(),
             "total_sentences": self.total_sentences,
             "processed_sentences": self.processed_sentences,
-            "is_processing": self.is_processing
+            "is_processing": self.is_processing,
+            "current_synthesizing_sentence": self.current_synthesizing_sentence[:50] + "..." if self.current_synthesizing_sentence and len(self.current_synthesizing_sentence) > 50 else self.current_synthesizing_sentence
         }
 
 
@@ -465,10 +488,11 @@ async def stop_asr(sid):
 
 
 """
-TODO: 客户端能传入文本片段，需要在服务端缓冲区进行拼接，分句合成音频
+客户端能传入文本片段，需要在服务端缓冲区进行拼接，分句合成音频
 
-TODO: 添加停止语音合成，并且合成所有缓存文本的指令
-服务端可能存在未满足分句条件的缓存文本，需要在文本流发送结束后立刻发送此指令，否则有可能丢失文本。
+服务端可能存在未满足分句条件的缓存文本，
+需要在文本流发送结束后立刻发送停止语音合成，
+并且合成所有缓存文本的指令，否则有可能丢失文本。
 """
 
 
@@ -480,6 +504,7 @@ async def start_tts(sid, data):
     try:
         text = data.get("text", "")
         spk_id = data.get("spk_id", 0)
+        tts_type = data.get("type", "basic")  # 基础TTS或流式TTS
 
         if not text:
             await sio.emit("tts_error", {"error": "Text is required"}, room=sid)
@@ -487,7 +512,9 @@ async def start_tts(sid, data):
 
         # 定义流式回调函数
         async def stream_callback(chunk_data):
-            await sio.emit("tts_stream", chunk_data, room=sid)
+            # 添加类型信息
+            chunk_data["type"] = tts_type
+            await sio.emit("tts_stream_audio", chunk_data, room=sid)
 
         # 开始TTS合成
         result = await tts_executor.synthesize_text(
@@ -495,7 +522,9 @@ async def start_tts(sid, data):
         )
 
         if result["status"] == "completed":
-            await sio.emit("tts_completed", result, room=sid)
+            # 添加类型信息到完成事件
+            result["type"] = tts_type
+            await sio.emit("tts_synthesis_complete", result, room=sid)
         else:
             await sio.emit("tts_error", result, room=sid)
 
@@ -527,7 +556,9 @@ async def start_stream_tts(sid, data):
         
         # 定义流式回调函数
         async def stream_callback(chunk_data):
-            await sio.emit("tts_stream", chunk_data, room=sid)
+            # 为流式TTS添加类型信息
+            chunk_data["type"] = "stream"
+            await sio.emit("tts_stream_audio", chunk_data, room=sid)
             
         buffer_session.set_stream_callback(stream_callback)
         tts_buffer_sessions[sid] = buffer_session

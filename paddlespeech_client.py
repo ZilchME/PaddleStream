@@ -1,8 +1,6 @@
 import asyncio
 import json
-import base64
 import time
-import threading
 from typing import Callable, Optional
 
 from audio_hander import ASRWsAudioHandler, TTSWsHandler
@@ -314,6 +312,9 @@ class TTSWebServerExecutor:
         session = self.get_session(session_id)
         if not session:
             session = self.create_session(session_id)
+        else:
+            # 如果会话已存在，重置处理状态以允许新的合成请求
+            session.is_processing = False
             
         if stream_callback:
             session.set_stream_callback(stream_callback)
