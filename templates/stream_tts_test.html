@@ -1,0 +1,779 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流式TTS测试</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .tab-container {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .tab-buttons {
+            display: flex;
+            background: #e9ecef;
+        }
+        .tab-button {
+            flex: 1;
+            padding: 12px;
+            background: #e9ecef;
+            border: none;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .tab-button.active {
+            background: #007bff;
+            color: white;
+        }
+        .tab-content {
+            padding: 20px;
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: Arial, sans-serif;
+        }
+        input, select {
+            padding: 8px;
+            margin: 5px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        button:hover:not(:disabled) {
+            background: #0056b3;
+        }
+        button.secondary {
+            background: #6c757d;
+        }
+        button.secondary:hover:not(:disabled) {
+            background: #545b62;
+        }
+        button.danger {
+            background: #dc3545;
+        }
+        button.danger:hover:not(:disabled) {
+            background: #c82333;
+        }
+        .log {
+            background: #000;
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .audio-controls {
+            margin: 10px 0;
+        }
+        audio {
+            width: 100%;
+            margin: 10px 0;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: #007bff;
+            transition: width 0.3s ease;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        .stat-item {
+            background: white;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+        }
+        .stream-demo {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+        .typing-area {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px 0;
+        }
+        .typing-text {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <h1>流式TTS语音合成测试</h1>
+    
+    <div class="container">
+        <h3>连接状态</h3>
+        <div id="connectionStatus" class="status disconnected">未连接</div>
+    </div>
+
+    <div class="tab-container">
+        <div class="tab-buttons">
+            <button class="tab-button active" onclick="switchTab('basic')">基础TTS</button>
+            <button class="tab-button" onclick="switchTab('stream')">流式TTS</button>
+            <button class="tab-button" onclick="switchTab('demo')">演示</button>
+        </div>
+
+        <!-- 基础TTS标签页 -->
+        <div id="basicTab" class="tab-content active">
+            <h3>基础TTS合成</h3>
+            <label for="basicTextInput">要合成的文本:</label>
+            <textarea id="basicTextInput" placeholder="请输入要合成的文本...">你好，这是一个语音合成测试。我可以把文字转换成语音。</textarea>
+            
+            <div>
+                <label for="basicSpkSelect">说话人ID:</label>
+                <select id="basicSpkSelect">
+                    <option value="0">说话人 0</option>
+                    <option value="1">说话人 1</option>
+                    <option value="2">说话人 2</option>
+                </select>
+            </div>
+            
+            <div class="audio-controls">
+                <button id="basicStartBtn" onclick="startBasicTTS()">开始合成</button>
+                <button id="basicStopBtn" onclick="stopTTS()" disabled>停止合成</button>
+                <button id="basicPlayBtn" onclick="playAudio('basic')" disabled>播放音频</button>
+                <button id="basicDownloadBtn" onclick="downloadAudio('basic')" disabled>下载音频</button>
+            </div>
+            
+            <audio id="basicAudioPlayer" controls style="display: none;"></audio>
+            
+            <div id="basicProgress">等待开始...</div>
+            <div id="basicStats"></div>
+        </div>
+
+        <!-- 流式TTS标签页 -->
+        <div id="streamTab" class="tab-content">
+            <h3>流式TTS合成</h3>
+            
+            <div>
+                <label for="streamSpkSelect">说话人ID:</label>
+                <select id="streamSpkSelect">
+                    <option value="0">说话人 0</option>
+                    <option value="1">说话人 1</option>
+                    <option value="2">说话人 2</option>
+                </select>
+                
+                <label for="bufferSizeInput">缓冲区大小:</label>
+                <input type="number" id="bufferSizeInput" value="1000" min="100" max="5000">
+            </div>
+            
+            <div class="audio-controls">
+                <button id="streamStartBtn" onclick="startStreamTTS()">启动流式TTS</button>
+                <button id="streamStopBtn" onclick="stopTTS()" disabled>停止TTS</button>
+                <button id="flushBtn" onclick="flushBuffer()" disabled>清空缓冲区</button>
+                <button id="statusBtn" onclick="getTTSStatus()">获取状态</button>
+            </div>
+            
+            <div class="typing-area">
+                <input type="text" id="streamTextInput" class="typing-text" placeholder="输入文本片段..." maxlength="100">
+                <button onclick="sendTextChunk()">发送文本</button>
+                <button class="secondary" onclick="clearStreamText()">清空</button>
+            </div>
+            
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div id="bufferLength" class="stat-value">0</div>
+                    <div class="stat-label">缓冲区长度</div>
+                </div>
+                <div class="stat-item">
+                    <div id="pendingSentences" class="stat-value">0</div>
+                    <div class="stat-label">待合成句子</div>
+                </div>
+                <div class="stat-item">
+                    <div id="processedSentences" class="stat-value">0</div>
+                    <div class="stat-label">已合成句子</div>
+                </div>
+            </div>
+            
+            <audio id="streamAudioPlayer" controls style="display: none;"></audio>
+            
+            <div id="streamProgress">等待启动...</div>
+        </div>
+
+        <!-- 演示标签页 -->
+        <div id="demoTab" class="tab-content">
+            <h3>流式TTS演示</h3>
+            
+            <div class="stream-demo">
+                <h4>实时打字演示</h4>
+                <textarea id="demoTextInput" placeholder="输入要演示的长文本...">这是一个流式语音合成的演示。我们将模拟用户实时输入文本的场景，系统会自动进行分句处理和语音合成。当你看到文本被逐字输入时，TTS系统会在后台智能地将完整的句子提取出来进行语音合成，这样可以实现更自然的实时对话体验。</textarea>
+                
+                <div>
+                    <label>打字速度:</label>
+                    <input type="range" id="typingSpeed" min="50" max="500" value="150">
+                    <span id="speedValue">150ms</span>
+                    
+                    <label>每次字符数:</label>
+                    <input type="number" id="charsPerChunk" value="2" min="1" max="10">
+                </div>
+                
+                <div class="audio-controls">
+                    <button id="demoStartBtn" onclick="startTypingDemo()">开始演示</button>
+                    <button id="demoStopBtn" onclick="stopTypingDemo()" disabled>停止演示</button>
+                    <button class="secondary" onclick="resetDemo()">重置演示</button>
+                </div>
+                
+                <div>
+                    <h5>当前输入进度:</h5>
+                    <div class="progress-bar">
+                        <div id="typingProgress" class="progress-fill" style="width: 0%;"></div>
+                    </div>
+                    <div id="currentTyping"></div>
+                </div>
+            </div>
+            
+            <div class="stream-demo">
+                <h4>预设文本测试</h4>
+                <div>
+                    <button onclick="loadPresetText(0)">短文本</button>
+                    <button onclick="loadPresetText(1)">中文本</button>
+                    <button onclick="loadPresetText(2)">长文本</button>
+                    <button onclick="loadPresetText(3)">混合标点</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <h3>日志</h3>
+        <div id="log" class="log"></div>
+        <button class="secondary" onclick="clearLog()">清空日志</button>
+    </div>
+
+    <script>
+        // Socket.IO连接
+        const socket = io();
+        
+        // 全局变量
+        let isConnected = false;
+        let isSynthesizing = false;
+        let isStreamTTSActive = false;
+        let basicAudioChunks = [];
+        let streamAudioChunks = [];
+        let typingDemo = null;
+        
+        // 预设文本
+        const presetTexts = [
+            "你好！这是一个简单的测试。",
+            "欢迎使用流式语音合成系统。这个系统可以实时处理文本输入，并生成高质量的语音输出。它支持多种说话人，可以满足不同的应用需求。",
+            "流式语音合成是一种先进的技术，它允许用户逐步输入文本，系统会智能地进行分句处理。当检测到完整的句子时，系统立即开始语音合成过程。这种方式特别适用于实时对话、在线翻译、智能客服等场景。与传统的批量处理方式相比，流式处理可以显著降低延迟，提供更加自然流畅的用户体验。",
+            "这里有各种标点符号：问号？感叹号！逗号，分号；还有句号。换行符也会被识别。\n这是新的一行。混合中英文也没问题：Hello world! 你好世界！"
+        ];
+        
+        // DOM元素
+        const connectionStatus = document.getElementById('connectionStatus');
+        const logDiv = document.getElementById('log');
+        const typingSpeedSlider = document.getElementById('typingSpeed');
+        const speedValue = document.getElementById('speedValue');
+        
+        // 更新打字速度显示
+        typingSpeedSlider.addEventListener('input', (e) => {
+            speedValue.textContent = e.target.value + 'ms';
+        });
+
+        // 日志功能
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${timestamp}] ${message}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        function clearLog() {
+            logDiv.innerHTML = '';
+        }
+
+        // 标签页切换
+        function switchTab(tabName) {
+            // 隐藏所有标签页
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // 显示选中的标签页
+            document.getElementById(tabName + 'Tab').classList.add('active');
+            event.target.classList.add('active');
+        }
+
+        // Socket.IO事件处理
+        socket.on('connect', () => {
+            isConnected = true;
+            connectionStatus.textContent = '已连接';
+            connectionStatus.className = 'status connected';
+            log('连接到服务器成功');
+        });
+
+        socket.on('disconnect', () => {
+            isConnected = false;
+            connectionStatus.textContent = '未连接';
+            connectionStatus.className = 'status disconnected';
+            log('与服务器断开连接');
+        });
+
+        socket.on('connected', (data) => {
+            log(`会话ID: ${data.session_id}`);
+        });
+
+        // 基础TTS事件
+        socket.on('tts_stream', (data) => {
+            if (data.type === 'audio_chunk') {
+                if (isStreamTTSActive) {
+                    streamAudioChunks.push(data.audio_data);
+                    log(`流式TTS: 接收音频块 ${data.chunk_index} (句子: "${data.sentence?.substring(0, 20)}...")`);
+                } else {
+                    basicAudioChunks.push(data.audio_data);
+                    document.getElementById('basicProgress').textContent = `正在合成... 已接收 ${data.chunk_index} 个音频块`;
+                    log(`基础TTS: 接收音频块 ${data.chunk_index}`);
+                }
+            } else if (data.type === 'synthesis_complete') {
+                if (isStreamTTSActive) {
+                    log(`流式TTS: 句子合成完成 (${data.processed_sentences}/${data.total_sentences})`);
+                } else {
+                    // 基础TTS完成
+                    isSynthesizing = false;
+                    document.getElementById('basicStartBtn').disabled = false;
+                    document.getElementById('basicStopBtn').disabled = true;
+                    document.getElementById('basicPlayBtn').disabled = false;
+                    document.getElementById('basicDownloadBtn').disabled = false;
+                    
+                    document.getElementById('basicProgress').textContent = '合成完成';
+                    document.getElementById('basicStats').innerHTML = `
+                        总时间: ${data.total_time.toFixed(2)}秒<br>
+                        总音频块: ${data.total_chunks}<br>
+                        首块延迟: ${data.first_chunk_time.toFixed(3)}秒
+                    `;
+                    
+                    log(`基础TTS合成完成 - 总块数: ${data.total_chunks}, 总时间: ${data.total_time.toFixed(2)}s`);
+                    createAudioFromChunks('basic');
+                }
+            }
+        });
+
+        // 流式TTS事件
+        socket.on('stream_tts_started', (data) => {
+            isStreamTTSActive = true;
+            document.getElementById('streamStartBtn').disabled = true;
+            document.getElementById('streamStopBtn').disabled = false;
+            document.getElementById('flushBtn').disabled = false;
+            document.getElementById('streamProgress').textContent = '流式TTS已启动，可以发送文本';
+            log(`流式TTS启动成功 - 说话人: ${data.spk_id}, 缓冲区大小: ${data.max_buffer_size}`);
+        });
+
+        socket.on('tts_buffer_status', (data) => {
+            const status = data.status;
+            document.getElementById('bufferLength').textContent = status.buffer_length;
+            document.getElementById('pendingSentences').textContent = status.pending_sentences;
+            document.getElementById('processedSentences').textContent = status.processed_sentences;
+            
+            if (data.new_sentences > 0) {
+                log(`缓冲区状态更新: 新增 ${data.new_sentences} 个句子`);
+            }
+        });
+
+        socket.on('tts_buffer_flushed', (data) => {
+            log(`缓冲区已清空，剩余句子: ${data.remaining_sentences}`);
+        });
+
+        socket.on('tts_status', (data) => {
+            if (data.exists !== false) {
+                document.getElementById('bufferLength').textContent = data.buffer_length || 0;
+                document.getElementById('pendingSentences').textContent = data.pending_sentences || 0;
+                document.getElementById('processedSentences').textContent = data.processed_sentences || 0;
+                log(`TTS状态: ${JSON.stringify(data)}`);
+            } else {
+                log('TTS会话不存在');
+            }
+        });
+
+        socket.on('tts_error', (data) => {
+            log(`TTS错误: ${data.error || data.message}`);
+            isSynthesizing = false;
+            isStreamTTSActive = false;
+            document.getElementById('basicStartBtn').disabled = false;
+            document.getElementById('basicStopBtn').disabled = true;
+            document.getElementById('streamStartBtn').disabled = false;
+            document.getElementById('streamStopBtn').disabled = true;
+            document.getElementById('flushBtn').disabled = true;
+        });
+
+        socket.on('tts_stopped', (data) => {
+            log('TTS合成已停止');
+            isSynthesizing = false;
+            isStreamTTSActive = false;
+            document.getElementById('basicStartBtn').disabled = false;
+            document.getElementById('basicStopBtn').disabled = true;
+            document.getElementById('streamStartBtn').disabled = false;
+            document.getElementById('streamStopBtn').disabled = true;
+            document.getElementById('flushBtn').disabled = true;
+        });
+
+        // 基础TTS功能
+        function startBasicTTS() {
+            if (!isConnected) {
+                alert('请先连接到服务器');
+                return;
+            }
+
+            const text = document.getElementById('basicTextInput').value.trim();
+            if (!text) {
+                alert('请输入要合成的文本');
+                return;
+            }
+
+            basicAudioChunks = [];
+            document.getElementById('basicPlayBtn').disabled = true;
+            document.getElementById('basicDownloadBtn').disabled = true;
+            document.getElementById('basicAudioPlayer').style.display = 'none';
+            
+            isSynthesizing = true;
+            document.getElementById('basicStartBtn').disabled = true;
+            document.getElementById('basicStopBtn').disabled = false;
+            
+            document.getElementById('basicProgress').textContent = '开始合成...';
+            document.getElementById('basicStats').innerHTML = '';
+            
+            log(`开始基础TTS合成: "${text.substring(0, 50)}..."`);
+            
+            socket.emit('start_tts', {
+                text: text,
+                spk_id: parseInt(document.getElementById('basicSpkSelect').value)
+            });
+        }
+
+        // 流式TTS功能
+        function startStreamTTS() {
+            if (!isConnected) {
+                alert('请先连接到服务器');
+                return;
+            }
+
+            streamAudioChunks = [];
+            document.getElementById('streamAudioPlayer').style.display = 'none';
+            
+            const spkId = parseInt(document.getElementById('streamSpkSelect').value);
+            const bufferSize = parseInt(document.getElementById('bufferSizeInput').value);
+            
+            log('启动流式TTS会话...');
+            
+            socket.emit('start_stream_tts', {
+                spk_id: spkId,
+                max_buffer_size: bufferSize
+            });
+        }
+
+        function sendTextChunk() {
+            if (!isStreamTTSActive) {
+                alert('请先启动流式TTS');
+                return;
+            }
+
+            const text = document.getElementById('streamTextInput').value;
+            if (!text) {
+                return;
+            }
+
+            socket.emit('stream_text', { text: text });
+            log(`发送文本片段: "${text}"`);
+            document.getElementById('streamTextInput').value = '';
+        }
+
+        function clearStreamText() {
+            document.getElementById('streamTextInput').value = '';
+        }
+
+        function flushBuffer() {
+            if (!isStreamTTSActive) {
+                alert('流式TTS未启动');
+                return;
+            }
+
+            socket.emit('flush_tts_buffer');
+            log('请求清空缓冲区');
+        }
+
+        function getTTSStatus() {
+            socket.emit('get_tts_status');
+        }
+
+        function stopTTS() {
+            socket.emit('stop_tts');
+            log('请求停止TTS合成');
+            
+            if (typingDemo) {
+                stopTypingDemo();
+            }
+        }
+
+        // 音频处理功能
+        function createAudioFromChunks(type) {
+            const chunks = type === 'basic' ? basicAudioChunks : streamAudioChunks;
+            const audioPlayer = document.getElementById(type + 'AudioPlayer');
+            
+            if (chunks.length === 0) {
+                log('没有音频数据');
+                return;
+            }
+
+            try {
+                let totalLength = 0;
+                const decodedChunks = chunks.map(chunk => {
+                    const binaryString = atob(chunk);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    totalLength += bytes.length;
+                    return bytes;
+                });
+
+                const mergedAudio = new Uint8Array(totalLength);
+                let offset = 0;
+                decodedChunks.forEach(chunk => {
+                    mergedAudio.set(chunk, offset);
+                    offset += chunk.length;
+                });
+
+                const wavData = createWAVFile(mergedAudio, 24000);
+                const blob = new Blob([wavData], { type: 'audio/wav' });
+                const audioUrl = URL.createObjectURL(blob);
+                
+                audioPlayer.src = audioUrl;
+                audioPlayer.style.display = 'block';
+                audioPlayer.audioBlob = blob;
+                
+                log(`${type}音频文件创建成功`);
+            } catch (error) {
+                log(`创建${type}音频文件失败: ${error.message}`);
+            }
+        }
+
+        function createWAVFile(audioData, sampleRate) {
+            const length = audioData.length;
+            const arrayBuffer = new ArrayBuffer(44 + length);
+            const view = new DataView(arrayBuffer);
+
+            const writeString = (offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + length, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, 'data');
+            view.setUint32(40, length, true);
+
+            const audioDataView = new Uint8Array(arrayBuffer, 44);
+            audioDataView.set(audioData);
+
+            return arrayBuffer;
+        }
+
+        function playAudio(type) {
+            const audioPlayer = document.getElementById(type + 'AudioPlayer');
+            if (audioPlayer.src) {
+                audioPlayer.play();
+                log(`开始播放${type}音频`);
+            }
+        }
+
+        function downloadAudio(type) {
+            const audioPlayer = document.getElementById(type + 'AudioPlayer');
+            if (audioPlayer.audioBlob) {
+                const url = URL.createObjectURL(audioPlayer.audioBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${type}_tts_output_${Date.now()}.wav`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                log(`${type}音频文件下载开始`);
+            }
+        }
+
+        // 演示功能
+        function startTypingDemo() {
+            const text = document.getElementById('demoTextInput').value.trim();
+            if (!text) {
+                alert('请输入演示文本');
+                return;
+            }
+
+            if (!isConnected) {
+                alert('请先连接到服务器');
+                return;
+            }
+
+            // 启动流式TTS
+            if (!isStreamTTSActive) {
+                socket.emit('start_stream_tts', {
+                    spk_id: 0,
+                    max_buffer_size: 1000
+                });
+                
+                // 等待流式TTS启动
+                setTimeout(() => {
+                    actuallyStartDemo(text);
+                }, 1000);
+            } else {
+                actuallyStartDemo(text);
+            }
+        }
+
+        function actuallyStartDemo(text) {
+            const speed = parseInt(document.getElementById('typingSpeed').value);
+            const charsPerChunk = parseInt(document.getElementById('charsPerChunk').value);
+            
+            document.getElementById('demoStartBtn').disabled = true;
+            document.getElementById('demoStopBtn').disabled = false;
+            
+            let currentIndex = 0;
+            const progressBar = document.getElementById('typingProgress');
+            const currentTypingDiv = document.getElementById('currentTyping');
+            
+            typingDemo = setInterval(() => {
+                if (currentIndex >= text.length) {
+                    stopTypingDemo();
+                    socket.emit('flush_tts_buffer');
+                    return;
+                }
+                
+                const chunk = text.slice(currentIndex, currentIndex + charsPerChunk);
+                socket.emit('stream_text', { text: chunk });
+                
+                currentIndex += charsPerChunk;
+                const progress = (currentIndex / text.length) * 100;
+                progressBar.style.width = progress + '%';
+                currentTypingDiv.textContent = text.slice(0, currentIndex);
+                
+                log(`演示: 发送 "${chunk}"`);
+            }, speed);
+        }
+
+        function stopTypingDemo() {
+            if (typingDemo) {
+                clearInterval(typingDemo);
+                typingDemo = null;
+            }
+            
+            document.getElementById('demoStartBtn').disabled = false;
+            document.getElementById('demoStopBtn').disabled = true;
+            log('打字演示已停止');
+        }
+
+        function resetDemo() {
+            stopTypingDemo();
+            document.getElementById('typingProgress').style.width = '0%';
+            document.getElementById('currentTyping').textContent = '';
+        }
+
+        function loadPresetText(index) {
+            if (index >= 0 && index < presetTexts.length) {
+                document.getElementById('demoTextInput').value = presetTexts[index];
+                log(`加载预设文本 ${index + 1}`);
+            }
+        }
+
+        // 页面加载完成后的初始化
+        window.addEventListener('load', () => {
+            log('页面加载完成，等待连接...');
+        });
+
+        // 回车键发送文本
+        document.getElementById('streamTextInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                sendTextChunk();
+            }
+        });
+    </script>
+</body>
+</html>

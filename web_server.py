@@ -1,8 +1,11 @@
 import asyncio
 import base64
 import json
+import re
 import threading
 import time
+from typing import Optional, List, Callable, Dict, Any
+from queue import Queue, Empty
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -45,6 +48,12 @@ async def tts_test(request: Request):
     return templates.TemplateResponse("tts_test.html", {"request": request})
 
 
+@app.get("/stream-tts", response_class=HTMLResponse)
+async def stream_tts_test(request: Request):
+    """流式TTS测试页面"""
+    return templates.TemplateResponse("stream_tts_test.html", {"request": request})
+
+
 @app.get("/health")
 async def health_check():
     """健康检查端点"""
@@ -58,6 +67,215 @@ asr_sessions = {}
 tts_executor = TTSWebServerExecutor(
     server_ip=TTS_SERVER_CONFIG["default_ip"], port=TTS_SERVER_CONFIG["default_port"]
 )
+
+# 全局TTS缓冲会话管理器
+tts_buffer_sessions = {}
+
+
+class TTSBufferSession:
+    """TTS缓冲会话类，支持流式文本输入和实时语音合成"""
+    
+    def __init__(self, session_id: str, spk_id: int = 0, max_buffer_size: int = 1000):
+        self.session_id = session_id
+        self.spk_id = spk_id
+        self.max_buffer_size = max_buffer_size
+        
+        # 文本缓冲区
+        self.text_buffer = ""
+        self.pending_sentences = Queue()  # 待合成的句子队列
+        
+        # 分句规则：中文句号、英文句号、问号、感叹号、换行符
+        self.sentence_endings = re.compile(r'[。！？\.\!\?\n]+')
+        
+        # 合成状态
+        self.is_processing = False
+        self.synthesis_thread = None
+        self.stop_synthesis = False
+        
+        # 回调函数
+        self.stream_callback: Optional[Callable] = None
+        
+        # 统计信息
+        self.total_sentences = 0
+        self.processed_sentences = 0
+        
+    def set_stream_callback(self, callback: Callable):
+        """设置流式音频数据回调函数"""
+        self.stream_callback = callback
+        
+    def add_text(self, text: str) -> List[str]:
+        """
+        添加文本到缓冲区，自动处理分句
+        
+        Args:
+            text (str): 新增的文本片段
+            
+        Returns:
+            List[str]: 本次提取出的完整句子列表
+        """
+        self.text_buffer += text
+        
+        # 检查缓冲区大小
+        if len(self.text_buffer) > self.max_buffer_size:
+            # 如果缓冲区过大，强制分句（防止内存溢出）
+            sentences = self._force_split_buffer()
+        else:
+            # 正常分句处理
+            sentences = self._extract_sentences()
+            
+        # 将提取的句子加入待合成队列
+        for sentence in sentences:
+            if sentence.strip():  # 忽略空字符串
+                self.pending_sentences.put(sentence.strip())
+                self.total_sentences += 1
+                
+        return sentences
+        
+    def _extract_sentences(self) -> List[str]:
+        """从缓冲区提取完整的句子"""
+        sentences = []
+        
+        # 使用正则表达式分割句子
+        parts = self.sentence_endings.split(self.text_buffer)
+        
+        # 如果有多个部分，说明找到了句子分隔符
+        if len(parts) > 1:
+            # 前面的部分都是完整句子
+            sentences = parts[:-1]
+            # 最后一部分可能是不完整的句子，保留在缓冲区
+            self.text_buffer = parts[-1]
+        
+        return sentences
+        
+    def _force_split_buffer(self) -> List[str]:
+        """强制分割缓冲区（当缓冲区过大时）"""
+        sentences = []
+        
+        # 首先尝试正常分句
+        normal_sentences = self._extract_sentences()
+        sentences.extend(normal_sentences)
+        
+        # 如果缓冲区仍然过大，按固定长度分割
+        if len(self.text_buffer) > self.max_buffer_size // 2:
+            # 按逗号、分号等标点分割
+            comma_parts = re.split(r'[，,；;]', self.text_buffer)
+            if len(comma_parts) > 1:
+                sentences.extend(comma_parts[:-1])
+                self.text_buffer = comma_parts[-1]
+            else:
+                # 最后手段：按固定长度强制分割
+                chunk_size = self.max_buffer_size // 4
+                while len(self.text_buffer) > chunk_size:
+                    sentences.append(self.text_buffer[:chunk_size])
+                    self.text_buffer = self.text_buffer[chunk_size:]
+                    
+        return sentences
+        
+    def flush_buffer(self) -> List[str]:
+        """
+        清空缓冲区，将剩余文本作为句子处理
+        
+        Returns:
+            List[str]: 剩余的文本片段列表
+        """
+        sentences = []
+        
+        if self.text_buffer.strip():
+            sentences.append(self.text_buffer.strip())
+            self.pending_sentences.put(self.text_buffer.strip())
+            self.total_sentences += 1
+            self.text_buffer = ""
+            
+        return sentences
+        
+    def start_synthesis(self):
+        """开始后台合成处理"""
+        if self.is_processing:
+            return
+            
+        self.is_processing = True
+        self.stop_synthesis = False
+        self.synthesis_thread = threading.Thread(target=self._synthesis_worker)
+        self.synthesis_thread.start()
+        
+    def _synthesis_worker(self):
+        """后台合成工作线程"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            loop.run_until_complete(self._synthesis_loop())
+        except Exception as e:
+            print(f"TTS synthesis worker error: {e}")
+        finally:
+            loop.close()
+            self.is_processing = False
+            
+    async def _synthesis_loop(self):
+        """异步合成循环"""
+        while not self.stop_synthesis:
+            try:
+                # 尝试获取待合成的句子
+                sentence = self.pending_sentences.get(timeout=1.0)
+                
+                if sentence and not self.stop_synthesis:
+                    # 执行TTS合成
+                    await self._synthesize_sentence(sentence)
+                    self.processed_sentences += 1
+                    
+            except Empty:
+                # 队列为空，继续等待
+                continue
+            except Exception as e:
+                print(f"Error in synthesis loop: {e}")
+                
+    async def _synthesize_sentence(self, sentence: str):
+        """合成单个句子"""
+        try:
+            # 定义流式回调函数
+            async def sentence_stream_callback(chunk_data):
+                if self.stream_callback:
+                    # 添加句子信息到chunk数据
+                    chunk_data["sentence"] = sentence
+                    chunk_data["total_sentences"] = self.total_sentences
+                    chunk_data["processed_sentences"] = self.processed_sentences
+                    await self.stream_callback(chunk_data)
+                    
+            # 使用TTS执行器合成句子
+            result = await tts_executor.synthesize_text(
+                session_id=f"{self.session_id}_sentence_{self.processed_sentences}",
+                text=sentence,
+                spk_id=self.spk_id,
+                stream_callback=sentence_stream_callback
+            )
+            
+            print(f"Synthesized sentence {self.processed_sentences}: {sentence[:50]}...")
+            
+        except Exception as e:
+            print(f"Error synthesizing sentence '{sentence[:50]}...': {e}")
+            
+    def stop_processing(self):
+        """停止合成处理"""
+        self.stop_synthesis = True
+        self.is_processing = False
+        
+        # 清空队列
+        while not self.pending_sentences.empty():
+            try:
+                self.pending_sentences.get_nowait()
+            except Empty:
+                break
+                
+    def get_status(self) -> Dict[str, Any]:
+        """获取会话状态信息"""
+        return {
+            "session_id": self.session_id,
+            "buffer_length": len(self.text_buffer),
+            "pending_sentences": self.pending_sentences.qsize(),
+            "total_sentences": self.total_sentences,
+            "processed_sentences": self.processed_sentences,
+            "is_processing": self.is_processing
+        }
 
 
 class WebASRSession:
@@ -182,6 +400,11 @@ async def disconnect(sid):
 
     # 清理TTS会话
     tts_executor.remove_session(sid)
+    
+    # 清理TTS缓冲会话
+    if sid in tts_buffer_sessions:
+        tts_buffer_sessions[sid].stop_processing()
+        del tts_buffer_sessions[sid]
 
 
 @sio.event
@@ -241,6 +464,14 @@ async def stop_asr(sid):
         await sio.emit("asr_stopped", {"session_id": sid}, room=sid)
 
 
+"""
+TODO: 客户端能传入文本片段，需要在服务端缓冲区进行拼接，分句合成音频
+
+TODO: 添加停止语音合成，并且合成所有缓存文本的指令
+服务端可能存在未满足分句条件的缓存文本，需要在文本流发送结束后立刻发送此指令，否则有可能丢失文本。
+"""
+
+
 @sio.event
 async def start_tts(sid, data):
     """开始TTS合成"""
@@ -274,10 +505,131 @@ async def start_tts(sid, data):
 
 
 @sio.event
+async def start_stream_tts(sid, data):
+    """开始流式TTS合成（支持缓冲）"""
+    print(f"Starting streaming TTS for session: {sid}")
+    
+    try:
+        spk_id = data.get("spk_id", 0)
+        max_buffer_size = data.get("max_buffer_size", 1000)
+        
+        # 如果已存在会话，先停止
+        if sid in tts_buffer_sessions:
+            tts_buffer_sessions[sid].stop_processing()
+            del tts_buffer_sessions[sid]
+            
+        # 创建新的TTS缓冲会话
+        buffer_session = TTSBufferSession(
+            session_id=sid,
+            spk_id=spk_id,
+            max_buffer_size=max_buffer_size
+        )
+        
+        # 定义流式回调函数
+        async def stream_callback(chunk_data):
+            await sio.emit("tts_stream", chunk_data, room=sid)
+            
+        buffer_session.set_stream_callback(stream_callback)
+        tts_buffer_sessions[sid] = buffer_session
+        
+        # 开始后台合成处理
+        buffer_session.start_synthesis()
+        
+        await sio.emit("stream_tts_started", {
+            "session_id": sid,
+            "spk_id": spk_id,
+            "max_buffer_size": max_buffer_size
+        }, room=sid)
+        
+    except Exception as e:
+        print(f"Stream TTS start error: {e}")
+        await sio.emit("tts_error", {"error": str(e)}, room=sid)
+
+
+@sio.event
+async def stream_text(sid, data):
+    """接收流式文本数据"""
+    if sid not in tts_buffer_sessions:
+        await sio.emit("tts_error", {"error": "Stream TTS session not found"}, room=sid)
+        return
+        
+    try:
+        text = data.get("text", "")
+        
+        if not text:
+            return
+            
+        # 添加文本到缓冲区
+        buffer_session = tts_buffer_sessions[sid]
+        sentences = buffer_session.add_text(text)
+        
+        # 发送状态更新
+        status = buffer_session.get_status()
+        await sio.emit("tts_buffer_status", {
+            "status": status,
+            "new_sentences": len(sentences)
+        }, room=sid)
+        
+    except Exception as e:
+        print(f"Stream text error: {e}")
+        await sio.emit("tts_error", {"error": str(e)}, room=sid)
+
+
+@sio.event
+async def flush_tts_buffer(sid):
+    """清空TTS缓冲区，合成剩余文本"""
+    if sid not in tts_buffer_sessions:
+        await sio.emit("tts_error", {"error": "Stream TTS session not found"}, room=sid)
+        return
+        
+    try:
+        buffer_session = tts_buffer_sessions[sid]
+        remaining_sentences = buffer_session.flush_buffer()
+        
+        # 发送缓冲区清空状态
+        status = buffer_session.get_status()
+        await sio.emit("tts_buffer_flushed", {
+            "status": status,
+            "remaining_sentences": len(remaining_sentences),
+            "sentences": remaining_sentences
+        }, room=sid)
+        
+    except Exception as e:
+        print(f"Flush TTS buffer error: {e}")
+        await sio.emit("tts_error", {"error": str(e)}, room=sid)
+
+
+@sio.event
+async def get_tts_status(sid):
+    """获取TTS会话状态"""
+    try:
+        if sid in tts_buffer_sessions:
+            status = tts_buffer_sessions[sid].get_status()
+            await sio.emit("tts_status", status, room=sid)
+        else:
+            await sio.emit("tts_status", {
+                "session_id": sid,
+                "exists": False
+            }, room=sid)
+            
+    except Exception as e:
+        print(f"Get TTS status error: {e}")
+        await sio.emit("tts_error", {"error": str(e)}, room=sid)
+
+
+@sio.event
 async def stop_tts(sid):
     """停止TTS合成"""
     print(f"Stopping TTS for session: {sid}")
+    
+    # 停止普通TTS会话
     tts_executor.remove_session(sid)
+    
+    # 停止流式TTS缓冲会话
+    if sid in tts_buffer_sessions:
+        tts_buffer_sessions[sid].stop_processing()
+        del tts_buffer_sessions[sid]
+        
     await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
 
 
