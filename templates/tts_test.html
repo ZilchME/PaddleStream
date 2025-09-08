@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>流式TTS测试</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 100px;
+            margin-bottom: 10px;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        button:hover:not(:disabled) {
+            background: #0056b3;
+        }
+        .log {
+            background: #000;
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 4px;
+            height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .audio-controls {
+            margin: 10px 0;
+        }
+        audio {
+            width: 100%;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>流式TTS语音合成测试</h1>
+    
+    <div class="container">
+        <h3>连接状态</h3>
+        <div id="connectionStatus" class="status disconnected">未连接</div>
+    </div>
+
+    <div class="container">
+        <h3>TTS设置</h3>
+        <label for="textInput">要合成的文本:</label>
+        <textarea id="textInput" placeholder="请输入要合成的文本...">你好，这是一个语音合成测试。</textarea>
+        
+        <label for="spkSelect">说话人ID:</label>
+        <select id="spkSelect">
+            <option value="0">说话人 0</option>
+            <option value="1">说话人 1</option>
+            <option value="2">说话人 2</option>
+        </select>
+        
+        <div class="audio-controls">
+            <button id="startTtsBtn" onclick="startTTS()">开始合成</button>
+            <button id="stopTtsBtn" onclick="stopTTS()" disabled>停止合成</button>
+            <button id="playAudioBtn" onclick="playAudio()" disabled>播放音频</button>
+            <button id="downloadBtn" onclick="downloadAudio()" disabled>下载音频</button>
+        </div>
+        
+        <audio id="audioPlayer" controls style="display: none;"></audio>
+    </div>
+
+    <div class="container">
+        <h3>合成进度</h3>
+        <div id="progress">等待开始...</div>
+        <div id="stats"></div>
+    </div>
+
+    <div class="container">
+        <h3>日志</h3>
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        // Socket.IO连接
+        const socket = io();
+        
+        // 全局变量
+        let isConnected = false;
+        let isSynthesizing = false;
+        let audioChunks = [];
+        let audioContext;
+        let sampleRate = 24000; // 默认采样率
+        
+        // DOM元素
+        const connectionStatus = document.getElementById('connectionStatus');
+        const textInput = document.getElementById('textInput');
+        const spkSelect = document.getElementById('spkSelect');
+        const startTtsBtn = document.getElementById('startTtsBtn');
+        const stopTtsBtn = document.getElementById('stopTtsBtn');
+        const playAudioBtn = document.getElementById('playAudioBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const audioPlayer = document.getElementById('audioPlayer');
+        const progress = document.getElementById('progress');
+        const stats = document.getElementById('stats');
+        const logDiv = document.getElementById('log');
+
+        // 日志功能
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${timestamp}] ${message}<br>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        // Socket.IO事件处理
+        socket.on('connect', () => {
+            isConnected = true;
+            connectionStatus.textContent = '已连接';
+            connectionStatus.className = 'status connected';
+            log('连接到服务器成功');
+        });
+
+        socket.on('disconnect', () => {
+            isConnected = false;
+            connectionStatus.textContent = '未连接';
+            connectionStatus.className = 'status disconnected';
+            log('与服务器断开连接');
+        });
+
+        socket.on('connected', (data) => {
+            log(`会话ID: ${data.session_id}`);
+        });
+
+        socket.on('tts_stream', (data) => {
+            if (data.type === 'audio_chunk') {
+                // 接收到音频数据块
+                audioChunks.push(data.audio_data);
+                progress.textContent = `正在合成... 已接收 ${data.chunk_index} 个音频块`;
+                log(`接收音频块 ${data.chunk_index}`);
+            } else if (data.type === 'synthesis_complete') {
+                // 合成完成
+                isSynthesizing = false;
+                startTtsBtn.disabled = false;
+                stopTtsBtn.disabled = true;
+                playAudioBtn.disabled = false;
+                downloadBtn.disabled = false;
+                
+                progress.textContent = '合成完成';
+                stats.innerHTML = `
+                    总时间: ${data.total_time.toFixed(2)}秒<br>
+                    总音频块: ${data.total_chunks}<br>
+                    首块延迟: ${data.first_chunk_time.toFixed(3)}秒
+                `;
+                
+                log(`TTS合成完成 - 总块数: ${data.total_chunks}, 总时间: ${data.total_time.toFixed(2)}s`);
+                
+                // 合并音频数据并创建可播放的音频
+                createAudioFromChunks();
+            }
+        });
+
+        socket.on('tts_completed', (data) => {
+            log('TTS合成完全完成');
+        });
+
+        socket.on('tts_error', (data) => {
+            log(`TTS错误: ${data.error || data.message}`);
+            isSynthesizing = false;
+            startTtsBtn.disabled = false;
+            stopTtsBtn.disabled = true;
+            progress.textContent = '合成失败';
+        });
+
+        socket.on('tts_stopped', (data) => {
+            log('TTS合成已停止');
+            isSynthesizing = false;
+            startTtsBtn.disabled = false;
+            stopTtsBtn.disabled = true;
+            progress.textContent = '已停止';
+        });
+
+        // TTS控制函数
+        function startTTS() {
+            if (!isConnected) {
+                alert('请先连接到服务器');
+                return;
+            }
+
+            const text = textInput.value.trim();
+            if (!text) {
+                alert('请输入要合成的文本');
+                return;
+            }
+
+            // 重置状态
+            audioChunks = [];
+            playAudioBtn.disabled = true;
+            downloadBtn.disabled = true;
+            audioPlayer.style.display = 'none';
+            
+            isSynthesizing = true;
+            startTtsBtn.disabled = true;
+            stopTtsBtn.disabled = false;
+            
+            progress.textContent = '开始合成...';
+            stats.innerHTML = '';
+            
+            log(`开始TTS合成: "${text}"`);
+            
+            // 发送TTS请求
+            socket.emit('start_tts', {
+                text: text,
+                spk_id: parseInt(spkSelect.value)
+            });
+        }
+
+        function stopTTS() {
+            if (isSynthesizing) {
+                socket.emit('stop_tts');
+                log('请求停止TTS合成');
+            }
+        }
+
+        // 从音频块创建可播放的音频
+        function createAudioFromChunks() {
+            if (audioChunks.length === 0) {
+                log('没有音频数据');
+                return;
+            }
+
+            try {
+                // 将Base64编码的音频数据解码并合并
+                let totalLength = 0;
+                const decodedChunks = audioChunks.map(chunk => {
+                    const binaryString = atob(chunk);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    totalLength += bytes.length;
+                    return bytes;
+                });
+
+                // 合并所有音频数据
+                const mergedAudio = new Uint8Array(totalLength);
+                let offset = 0;
+                decodedChunks.forEach(chunk => {
+                    mergedAudio.set(chunk, offset);
+                    offset += chunk.length;
+                });
+
+                // 创建WAV文件
+                const wavData = createWAVFile(mergedAudio, sampleRate);
+                const blob = new Blob([wavData], { type: 'audio/wav' });
+                const audioUrl = URL.createObjectURL(blob);
+                
+                // 设置音频播放器
+                audioPlayer.src = audioUrl;
+                audioPlayer.style.display = 'block';
+                
+                // 存储blob用于下载
+                audioPlayer.audioBlob = blob;
+                
+                log('音频文件创建成功');
+            } catch (error) {
+                log(`创建音频文件失败: ${error.message}`);
+            }
+        }
+
+        // 创建WAV文件
+        function createWAVFile(audioData, sampleRate) {
+            const length = audioData.length;
+            const arrayBuffer = new ArrayBuffer(44 + length);
+            const view = new DataView(arrayBuffer);
+
+            // WAV文件头
+            const writeString = (offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + length, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(36, 'data');
+            view.setUint32(40, length, true);
+
+            // 复制音频数据
+            const audioDataView = new Uint8Array(arrayBuffer, 44);
+            audioDataView.set(audioData);
+
+            return arrayBuffer;
+        }
+
+        function playAudio() {
+            if (audioPlayer.src) {
+                audioPlayer.play();
+                log('开始播放音频');
+            }
+        }
+
+        function downloadAudio() {
+            if (audioPlayer.audioBlob) {
+                const url = URL.createObjectURL(audioPlayer.audioBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `tts_output_${Date.now()}.wav`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                log('音频文件下载开始');
+            }
+        }
+
+        // 页面加载完成后的初始化
+        window.addEventListener('load', () => {
+            log('页面加载完成，等待连接...');
+        });
+    </script>
+</body>
+</html>

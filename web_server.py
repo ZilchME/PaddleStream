@@ -11,7 +11,14 @@ import socketio
 import uvicorn
 import numpy as np
 from audio_hander import ASRWsAudioHandler
-from config import ASR_SERVER_CONFIG, WEB_SERVER_CONFIG, SOCKETIO_CONFIG, SOCKETIO_PATH
+from paddlespeech_client import TTSWebServerExecutor
+from config import (
+    ASR_SERVER_CONFIG,
+    TTS_SERVER_CONFIG,
+    WEB_SERVER_CONFIG,
+    SOCKETIO_CONFIG,
+    SOCKETIO_PATH,
+)
 
 # 创建 FastAPI 应用
 app = FastAPI()
@@ -23,6 +30,19 @@ socket_app = socketio.ASGIApp(sio, app, socketio_path=SOCKETIO_PATH)
 
 # 设置静态文件和模板
 app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
+
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    """主页"""
+    return templates.TemplateResponse("index.html", {"request": request})
+
+
+@app.get("/tts", response_class=HTMLResponse)
+async def tts_test(request: Request):
+    """TTS测试页面"""
+    return templates.TemplateResponse("tts_test.html", {"request": request})
 
 
 @app.get("/health")
@@ -33,6 +53,11 @@ async def health_check():
 
 # 全局变量存储ASR处理器和音频处理器
 asr_sessions = {}
+
+# 全局TTS服务执行器
+tts_executor = TTSWebServerExecutor(
+    server_ip=TTS_SERVER_CONFIG["default_ip"], port=TTS_SERVER_CONFIG["default_port"]
+)
 
 
 class WebASRSession:
@@ -137,6 +162,7 @@ class WebASRSession:
         if self.web_audio_handler:
             self.web_audio_handler.stop()
 
+
 @sio.event
 async def connect(sid, environ):
     """客户端连接"""
@@ -149,10 +175,13 @@ async def disconnect(sid):
     """客户端断开连接"""
     print(f"Client disconnected: {sid}")
 
-    # 清理会话
+    # 清理ASR会话
     if sid in asr_sessions:
         asr_sessions[sid].stop_processing()
         del asr_sessions[sid]
+
+    # 清理TTS会话
+    tts_executor.remove_session(sid)
 
 
 @sio.event
@@ -212,6 +241,46 @@ async def stop_asr(sid):
         await sio.emit("asr_stopped", {"session_id": sid}, room=sid)
 
 
+@sio.event
+async def start_tts(sid, data):
+    """开始TTS合成"""
+    print(f"Starting TTS for session: {sid}")
+
+    try:
+        text = data.get("text", "")
+        spk_id = data.get("spk_id", 0)
+
+        if not text:
+            await sio.emit("tts_error", {"error": "Text is required"}, room=sid)
+            return
+
+        # 定义流式回调函数
+        async def stream_callback(chunk_data):
+            await sio.emit("tts_stream", chunk_data, room=sid)
+
+        # 开始TTS合成
+        result = await tts_executor.synthesize_text(
+            session_id=sid, text=text, spk_id=spk_id, stream_callback=stream_callback
+        )
+
+        if result["status"] == "completed":
+            await sio.emit("tts_completed", result, room=sid)
+        else:
+            await sio.emit("tts_error", result, room=sid)
+
+    except Exception as e:
+        print(f"TTS error: {e}")
+        await sio.emit("tts_error", {"error": str(e)}, room=sid)
+
+
+@sio.event
+async def stop_tts(sid):
+    """停止TTS合成"""
+    print(f"Stopping TTS for session: {sid}")
+    tts_executor.remove_session(sid)
+    await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
+
+
 if __name__ == "__main__":
     print("Starting Web ASR Server...")
     print(f"Open http://localhost:{WEB_SERVER_CONFIG['port']} in your browser")
@@ -219,5 +288,4 @@ if __name__ == "__main__":
         socket_app,
         host=WEB_SERVER_CONFIG["host"],
         port=WEB_SERVER_CONFIG["port"],
-        reload=WEB_SERVER_CONFIG["reload"],
     )
