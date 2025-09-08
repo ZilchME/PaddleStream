@@ -23,10 +23,10 @@ SOCKETIO_CONFIG = {
 # Socket.IO 路径配置
 # 你可以修改这个路径来自定义Socket.IO的endpoint
 # 默认 Socket.IO 使用 /socket.io/ 路径
-# SOCKETIO_PATH = "/socket.io/"
+SOCKETIO_PATH = "/socket.io/"
 
 # 示例：为ASR服务创建专用路径
-SOCKETIO_PATH = "/asr/socket.io/"
+# SOCKETIO_PATH = "/asr/socket.io/"
 
 # 示例：为不同服务创建不同路径
 # SOCKETIO_PATH = "/services/asr/socket.io/"

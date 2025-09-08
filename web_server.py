@@ -23,22 +23,6 @@ socket_app = socketio.ASGIApp(sio, app, socketio_path=SOCKETIO_PATH)
 
 # 设置静态文件和模板
 app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
-
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    """主页 - 提供Socket.IO测试界面"""
-    # 将Socket.IO路径传递给模板
-    return templates.TemplateResponse(
-        "index.html", 
-        {
-            "request": request, 
-            "socketio_path": SOCKETIO_PATH,
-            "server_host": WEB_SERVER_CONFIG["host"],
-            "server_port": WEB_SERVER_CONFIG["port"]
-        }
-    )
 
 
 @app.get("/health")
@@ -124,9 +108,7 @@ class WebASRSession:
                 )
 
             # asyncio.run_coroutine_threadsafe(send_final_result(), self.loop)
-            print("1" * 50)
             self.loop.run_until_complete(send_final_result())
-            print("2" * 50)
 
         except Exception as e:
             print(f"ASR processing error: {e}")
