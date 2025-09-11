@@ -288,6 +288,10 @@ class TTSBufferSession:
             except Empty:
                 break
                 
+    def is_finished(self) -> bool:
+        """检查所有待处理的句子是否都已合成完毕"""
+        return self.pending_sentences.empty() and self.current_synthesizing_sentence is None
+
     def get_status(self) -> Dict[str, Any]:
         """获取会话状态信息"""
         return {
@@ -608,7 +612,7 @@ async def stream_text(sid, data):
 
 @sio.event
 async def flush_tts_buffer(sid):
-    """清空TTS缓冲区，合成剩余文本"""
+    """清空TTS缓冲区，合成剩余文本，并在完成后发送信号"""
     if sid not in tts_buffer_sessions:
         await sio.emit("tts_error", {"error": "Stream TTS session not found"}, room=sid)
         return
@@ -625,9 +629,22 @@ async def flush_tts_buffer(sid):
             "sentences": remaining_sentences
         }, room=sid)
         
+        # 启动一个后台任务来等待所有句子合成完毕
+        asyncio.create_task(_wait_for_synthesis_completion(sid, buffer_session))
+        
     except Exception as e:
         print(f"Flush TTS buffer error: {e}")
         await sio.emit("tts_error", {"error": str(e)}, room=sid)
+
+
+async def _wait_for_synthesis_completion(sid: str, session: TTSBufferSession):
+    """等待指定会话的所有句子合成完成"""
+    while not session.is_finished():
+        await asyncio.sleep(0.1)
+    
+    # 所有句子都已合成完毕，发送完成信号
+    print(f"所有句子合成完毕，会话: {sid}")
+    await sio.emit("stream_tts_finished", {"session_id": sid}, room=sid)
 
 
 @sio.event
