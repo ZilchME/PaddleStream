@@ -16,49 +16,6 @@ import os
 import wave
 
 
-class MicrophoneHandler:
-    def __init__(self, sample_rate=16000, chunk_size=1024):
-        self.sample_rate = sample_rate
-        self.chunk_size = chunk_size
-        self.audio_format = pyaudio.paInt16
-        self.channels = 1
-        self.is_recording = False
-        self.audio_queue = queue.Queue()
-        self.audio = pyaudio.PyAudio()
-
-    def _callback(self, in_data, frame_count, time_info, status):
-        if self.is_recording:
-            audio_data = np.frombuffer(in_data, dtype=np.int16)
-            self.audio_queue.put(audio_data.copy())
-        return (in_data, pyaudio.paContinue)
-
-    def start(self):
-        self.is_recording = True
-        self.stream = self.audio.open(
-            format=self.audio_format,
-            channels=self.channels,
-            rate=self.sample_rate,
-            input=True,
-            frames_per_buffer=self.chunk_size,
-            stream_callback=self._callback,
-        )
-        self.stream.start_stream()
-
-    def stop(self):
-        self.is_recording = False
-        if hasattr(self, "stream") and self.stream.is_active():
-            self.stream.stop_stream()
-            self.stream.close()
-        self.audio.terminate()
-
-    def read_microphone(self):
-        while self.is_recording or not self.audio_queue.empty():
-            try:
-                yield self.audio_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-
 class WebAudioHandler:
     """处理来自Web前端的音频流"""
 
@@ -186,6 +143,74 @@ class ASRWsAudioHandler:
             self.url = "ws://" + self.url + ":" + str(self.port) + endpoint
         self.punc_server = TextHttpHandler(punc_server_ip, punc_server_port)
         print(f"endpoint: {self.url}")
+
+    async def run(self, wavfile_path: str):
+        """Send a audio file to online server
+
+        Args:
+            wavfile_path (str): audio path
+
+        Returns:
+            str: the final asr result
+        """
+        logging.debug("send a message to the server")
+
+        if self.url is None:
+            print("No asr server, please input valid ip and port")
+            return ""
+
+        # 1. send websocket handshake protocol
+        start_time = time.time()
+        async with websockets.connect(self.url) as ws:
+            # 2. server has already received handshake protocol
+            # client start to send the command
+            audio_info = json.dumps(
+                {"name": "test.wav", "signal": "start", "nbest": 1},
+                sort_keys=True,
+                indent=4,
+                separators=(",", ": "),
+            )
+            await ws.send(audio_info)
+            msg = await ws.recv()
+            print("client receive msg={}".format(msg))
+
+            # 3. send chunk audio data to engine
+            for chunk_data in self.read_wave(wavfile_path):
+                await ws.send(chunk_data.tobytes())
+                msg = await ws.recv()
+                msg = json.loads(msg)
+                print("client receive msg={}".format(msg))
+            # client start to punctuation restore
+            # if self.punc_server and len(msg["result"]) > 0:
+            #     msg["result"] = self.punc_server.run(msg["result"])
+            #     print("client punctuation restored msg={}".format(msg))
+            # 4. we must send finished signal to the server
+            audio_info = json.dumps(
+                {"name": "test.wav", "signal": "end", "nbest": 1},
+                sort_keys=True,
+                indent=4,
+                separators=(",", ": "),
+            )
+            await ws.send(audio_info)
+            msg = await ws.recv()
+
+            # 5. decode the bytes to str
+            msg = json.loads(msg)
+
+            if self.punc_server:
+                msg["result"] = self.punc_server.run(msg["result"])
+
+            # 6. logging the final result and comptute the statstics
+            elapsed_time = time.time() - start_time
+            audio_info = soundfile.info(wavfile_path)
+            print("client final receive msg={}".format(msg))
+            print(
+                f"audio duration: {audio_info.duration}, elapsed time: {elapsed_time}, RTF={elapsed_time/audio_info.duration}"
+            )
+
+            result = msg
+
+            return result
 
     def create_web_audio_handler(self):
         """创建Web音频处理器"""

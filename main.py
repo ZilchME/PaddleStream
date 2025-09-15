@@ -14,38 +14,18 @@ python -c "from paddlespeech_client import ASROnlineClientExecutor; print(ASROnl
 
 import sys
 import os
-
-
-def run_mic_mode():
-    """运行原始麦克风模式"""
-    from paddlespeech_client import ASROnlineClientExecutor
-    
-    print("=" * 50)
-    print("🎤 StreamASR 麦克风模式")
-    print("=" * 50)
-    
-    asrclient_executor = ASROnlineClientExecutor()
-    res = asrclient_executor(
-        input="mic",
-        server_ip="127.0.0.1",
-        port=8090,
-        # punc_server_ip="127.0.0.1",
-        # punc_server_port=8190,
-    )
-    print(f"识别结果: {res}")
-
+import uvicorn
+from web_server import socket_app
 
 if __name__ == "__main__":
     try:
-        import uvicorn
-        from web_server import socket_app
         print("请确保PaddleSpeech ASR服务器已启动:")
         print("默认地址: ws://127.0.0.1:8090/paddlespeech/asr/streaming")
         print("")
         print("Web界面地址: http://localhost:8000")
         print("=" * 50)
-        
-        uvicorn.run(socket_app, host='0.0.0.0', port=8000)
+
+        uvicorn.run(socket_app, host="0.0.0.0", port=8000)
     except ImportError as e:
         print("错误: 缺少依赖包，请安装:")
         print("pip install fastapi uvicorn[standard] python-socketio aiohttp")
