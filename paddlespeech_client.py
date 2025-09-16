@@ -3,58 +3,58 @@ import json
 import time
 from typing import Callable, Optional
 
-from audio_hander import ASRWsAudioHandler, TTSWsHandler
+from audio_hander import ASRWsAudioHandler, WebSocketAudioHandler, TTSWsHandler
 
 
 class ASROnlineClientExecutor:
     def __init__(self):
         pass
 
-    def __call__(
+    def process_websocket_audio(
         self,
-        input: str,
+        audio_handler: WebSocketAudioHandler,
         server_ip: str = "127.0.0.1",
-        port: int = 8090,
+        port: int = 8091,
         punc_server_ip: str = None,
         punc_server_port: str = None,
-        web_audio_handler=None,
         real_time_callback=None,
     ):
-        """Python API to call asr online executor.
+        """处理来自WebSocket的音频数据
 
         Args:
-            input (str): the audio file to be send to streaming asr service or "mic" for microphone.
+            audio_handler (WebSocketAudioHandler): WebSocket音频处理器
             server_ip (str, optional): streaming asr server ip. Defaults to "127.0.0.1".
             port (int, optional): streaming asr server port. Defaults to 8091.
             punc_server_ip (str, optional): punctuation server ip. Defaults to None.
             punc_server_port (str, optional): punctuation server port. Defaults to None.
-            web_audio_handler: Web audio handler for processing web audio stream. Defaults to None.
-            real_time_callback: Callback function for real-time results. Defaults to None.
 
         Returns:
             str: the audio text
         """
-
-        print("asr websocket client start")
+        print("asr websocket client start for web audio")
         handler = ASRWsAudioHandler(
-            server_ip,
-            port,
+            url=server_ip,
+            port=port,
+            endpoint="/paddlespeech/asr/streaming",
             punc_server_ip=punc_server_ip,
             punc_server_port=punc_server_port,
         )
-        loop = asyncio.get_event_loop()
 
-        if web_audio_handler is not None:
-            res = loop.run_until_complete(
-                handler.run_web_audio(web_audio_handler, real_time_callback)
+        # 创建新的事件循环
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        res = loop.run_until_complete(
+            handler.run_websocket_audio(
+                audio_handler, real_time_callback=real_time_callback
             )
-        else:
-            print("Unsupported input type or missing web_audio_handler")
-            return ""
+        )
+        print("asr websocket client finished for web audio")
 
-        print("asr websocket client finished")
-
-        return res["result"] if res else ""
+        return res["result"]
 
 
 class TTSOnlineClientExecutor:

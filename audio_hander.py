@@ -9,67 +9,11 @@ import numpy as np
 import requests
 import soundfile
 import websockets
-import pyaudio
 import queue
-from collections import deque
 import os
 import wave
 
-
-class WebAudioHandler:
-    """处理来自Web前端的音频流"""
-
-    def __init__(self, sample_rate=16000, chunk_size=1024):
-        self.sample_rate = sample_rate
-        self.chunk_size = chunk_size
-        self.audio_queue = queue.Queue()
-        self.is_active = False
-        self.buffer = deque()
-        self.lock = threading.Lock()
-
-    def add_audio_data(self, audio_data):
-        """接收来自前端的音频数据"""
-        with self.lock:
-            if isinstance(audio_data, bytes):
-                # 如果是字节数据，转换为numpy数组
-                audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            elif isinstance(audio_data, (list, np.ndarray)):
-                # 如果是数组，确保是正确的数据类型
-                audio_array = np.array(audio_data, dtype=np.int16)
-            else:
-                print(f"Unsupported audio data type: {type(audio_data)}")
-                return
-
-            self.buffer.extend(audio_array)
-
-            # 当缓冲区有足够数据时，放入队列
-            while len(self.buffer) >= self.chunk_size:
-                chunk = np.array(
-                    [self.buffer.popleft() for _ in range(self.chunk_size)]
-                )
-                self.audio_queue.put(chunk)
-
-    def start(self):
-        """开始处理音频"""
-        self.is_active = True
-
-    def stop(self):
-        """停止处理音频"""
-        self.is_active = False
-        # 处理剩余的缓冲区数据
-        with self.lock:
-            if len(self.buffer) > 0:
-                remaining_data = np.array(list(self.buffer))
-                self.audio_queue.put(remaining_data)
-                self.buffer.clear()
-
-    def read_audio_stream(self):
-        """生成器，返回音频数据块"""
-        while self.is_active or not self.audio_queue.empty():
-            try:
-                yield self.audio_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+from datetime import datetime
 
 
 class TextHttpHandler:
@@ -117,6 +61,81 @@ class TextHttpHandler:
         return punc_text
 
 
+class WebSocketAudioHandler:
+    def __init__(self, sample_rate=16000, chunk_size=1024):
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        self.audio_queue = queue.Queue()
+        self.is_receiving = False
+        self.audio_data_buffer = []  # 用于保存完整的音频数据
+
+    def add_audio_data(self, audio_data: bytes):
+        """从Web端接收音频数据"""
+        if self.is_receiving:
+            # 将字节数据转换为numpy数组
+            audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            self.audio_queue.put(audio_array.copy())
+            # 同时保存到缓冲区用于后续保存文件
+            self.audio_data_buffer.append(audio_array.copy())
+
+    def start_processing(self):
+        """开始接收音频数据"""
+        self.is_receiving = True
+        self.audio_data_buffer = []  # 清空缓冲区
+
+    def stop_processing(self):
+        """停止接收音频数据"""
+        self.is_receiving = False
+
+    def read_audio_stream(self):
+        """生成器，返回音频数据流"""
+        while self.is_receiving or not self.audio_queue.empty():
+            try:
+                yield self.audio_queue.get(timeout=0.1)
+            except queue.Empty:
+                if not self.is_receiving:
+                    break
+                continue
+
+    def save_audio_to_file(self, filename=None, output_dir="audio_files"):
+        """保存音频数据到文件"""
+        if not self.audio_data_buffer:
+            print("没有音频数据可保存")
+            return None
+
+        # 创建输出目录
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # 生成文件名
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"audio_{timestamp}.wav"
+
+        # 确保文件名以.wav结尾
+        if not filename.endswith(".wav"):
+            filename += ".wav"
+
+        filepath = os.path.join(output_dir, filename)
+
+        try:
+            # 合并所有音频数据
+            complete_audio = np.concatenate(self.audio_data_buffer)
+
+            # 保存为WAV文件
+            soundfile.write(
+                filepath, complete_audio, self.sample_rate, subtype="PCM_16"
+            )
+
+            print(f"音频文件已保存: {filepath}")
+            print(f"音频长度: {len(complete_audio) / self.sample_rate:.2f} 秒")
+            return filepath
+
+        except Exception as e:
+            print(f"保存音频文件失败: {e}")
+            return None
+
+
 class ASRWsAudioHandler:
     def __init__(
         self,
@@ -144,96 +163,21 @@ class ASRWsAudioHandler:
         self.punc_server = TextHttpHandler(punc_server_ip, punc_server_port)
         print(f"endpoint: {self.url}")
 
-    async def run(self, wavfile_path: str):
-        """Send a audio file to online server
-
-        Args:
-            wavfile_path (str): audio path
-
-        Returns:
-            str: the final asr result
-        """
-        logging.debug("send a message to the server")
-
+    async def run_websocket_audio(
+        self, audio_handler: WebSocketAudioHandler, real_time_callback=None
+    ):
+        """处理来自WebSocket的音频数据流"""
         if self.url is None:
             print("No asr server, please input valid ip and port")
             return ""
 
-        # 1. send websocket handshake protocol
+        # 建立WebSocket连接
         start_time = time.time()
-        async with websockets.connect(self.url) as ws:
-            # 2. server has already received handshake protocol
-            # client start to send the command
-            audio_info = json.dumps(
-                {"name": "test.wav", "signal": "start", "nbest": 1},
-                sort_keys=True,
-                indent=4,
-                separators=(",", ": "),
-            )
-            await ws.send(audio_info)
-            msg = await ws.recv()
-            print("client receive msg={}".format(msg))
-
-            # 3. send chunk audio data to engine
-            for chunk_data in self.read_wave(wavfile_path):
-                await ws.send(chunk_data.tobytes())
-                msg = await ws.recv()
-                msg = json.loads(msg)
-                print("client receive msg={}".format(msg))
-            # client start to punctuation restore
-            # if self.punc_server and len(msg["result"]) > 0:
-            #     msg["result"] = self.punc_server.run(msg["result"])
-            #     print("client punctuation restored msg={}".format(msg))
-            # 4. we must send finished signal to the server
-            audio_info = json.dumps(
-                {"name": "test.wav", "signal": "end", "nbest": 1},
-                sort_keys=True,
-                indent=4,
-                separators=(",", ": "),
-            )
-            await ws.send(audio_info)
-            msg = await ws.recv()
-
-            # 5. decode the bytes to str
-            msg = json.loads(msg)
-
-            if self.punc_server:
-                msg["result"] = self.punc_server.run(msg["result"])
-
-            # 6. logging the final result and comptute the statstics
-            elapsed_time = time.time() - start_time
-            audio_info = soundfile.info(wavfile_path)
-            print("client final receive msg={}".format(msg))
-            print(
-                f"audio duration: {audio_info.duration}, elapsed time: {elapsed_time}, RTF={elapsed_time/audio_info.duration}"
-            )
-
-            result = msg
-
-            return result
-
-    def create_web_audio_handler(self):
-        """创建Web音频处理器"""
-        return WebAudioHandler(sample_rate=16000)
-
-    async def run_web_audio(self, web_audio_handler, real_time_callback=None):
-        """处理来自Web的音频流
-
-        Args:
-            web_audio_handler: Web音频处理器
-            real_time_callback: 实时结果回调函数，用于发送中间识别结果
-        """
-        if self.url is None:
-            print("No asr server, please input valid ip and port")
-            return ""
-
-        start_time = time.time()
-        # ws: 飞桨语音识别后端WebSocket连接
         async with websockets.connect(self.url) as ws:
             # 发送开始信号
             audio_info = json.dumps(
                 {
-                    "name": "web_audio",
+                    "name": "websocket_audio",
                     "signal": "start",
                     "nbest": 1,
                 },
@@ -245,18 +189,18 @@ class ASRWsAudioHandler:
             msg = await ws.recv()
             print(f"server: {msg}")
 
-            # 启动音频处理器
-            web_audio_handler.start()
-            print("开始处理Web音频流...")
+            # 发送音频数据
+            print("开始处理WebSocket音频数据...")
 
             # 用于检测静音的变量
-            # TODO: 可以改进为基于音频能量的静音检测
             last_result = None
             last_result_time = None
             silence_timeout = 3  # 3秒
 
-            # 处理音频数据
-            for chunk_data in web_audio_handler.read_audio_stream():
+            for chunk_data in audio_handler.read_audio_stream():
+                if not audio_handler.is_receiving and audio_handler.audio_queue.empty():
+                    break
+
                 # 处理音频数据块
                 chunk_data = chunk_data.astype(np.int16)
                 await ws.send(chunk_data.tobytes())
@@ -268,12 +212,8 @@ class ASRWsAudioHandler:
                     current_result = msg.get("result", "")
                     print("client receive msg={}".format(msg))
 
-                    if current_result:
-                        # 发送实时结果到前端
-                        if real_time_callback:
-                            real_time_callback(
-                                current_result, msg.get("type", "partial")
-                            )
+                    if real_time_callback and current_result:
+                        real_time_callback(current_result, msg.get("type", "partial"))
 
                     # 检查结果是否与上次相同
                     if current_result and current_result == last_result:
@@ -281,7 +221,7 @@ class ASRWsAudioHandler:
                             last_result_time = time.time()
                         elif time.time() - last_result_time >= silence_timeout:
                             print(
-                                f"No speech detected for {silence_timeout} seconds, processing complete."
+                                f"No speech detected for {silence_timeout} seconds, closing connection."
                             )
                             break
                     else:
@@ -294,7 +234,7 @@ class ASRWsAudioHandler:
             # 发送结束信号
             audio_info = json.dumps(
                 {
-                    "name": "web_audio",
+                    "name": "websocket_audio",
                     "signal": "end",
                     "nbest": 1,
                 },
@@ -305,9 +245,6 @@ class ASRWsAudioHandler:
             await ws.send(audio_info)
             msg = await ws.recv()
             msg = json.loads(msg)
-
-            # 停止音频处理器
-            web_audio_handler.stop()
 
             # 添加标点
             if self.punc_server and len(msg["result"]) > 0:

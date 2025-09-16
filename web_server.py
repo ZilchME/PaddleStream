@@ -1,22 +1,23 @@
 import asyncio
 import base64
-import json
-import os
 import re
 import threading
-import time
-import wave
+
+import os
+from datetime import datetime
+
+
 from typing import Optional, List, Callable, Dict, Any
 from queue import Queue, Empty
-from fastapi import FastAPI, WebSocket, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
 import socketio
 import uvicorn
-import numpy as np
-from audio_hander import ASRWsAudioHandler
-from paddlespeech_client import TTSWebServerExecutor
+from audio_hander import WebSocketAudioHandler
+from paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
 from config import (
     ASR_SERVER_CONFIG,
     TTS_SERVER_CONFIG,
@@ -62,8 +63,45 @@ async def health_check():
     return {"status": "healthy", "socketio_path": SOCKETIO_PATH}
 
 
-# 全局变量存储ASR处理器和音频处理器
-asr_sessions = {}
+@app.get("/audio-files")
+async def list_audio_files():
+    """获取保存的音频文件列表"""
+    audio_dir = "audio_files"
+    if not os.path.exists(audio_dir):
+        return {"files": []}
+
+    files = []
+    for filename in os.listdir(audio_dir):
+        if filename.endswith(".wav"):
+            filepath = os.path.join(audio_dir, filename)
+            stat = os.stat(filepath)
+            files.append(
+                {
+                    "filename": filename,
+                    "size": stat.st_size,
+                    "created": datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                    "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                }
+            )
+
+    # 按创建时间排序，最新的在前
+    files.sort(key=lambda x: x["created"], reverse=True)
+    return {"files": files}
+
+
+@app.get("/audio-files/{filename}")
+async def download_audio_file(filename: str):
+    """下载音频文件"""
+    audio_dir = "audio_files"
+    filepath = os.path.join(audio_dir, filename)
+
+    if not os.path.exists(filepath) or not filename.endswith(".wav"):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    from fastapi.responses import FileResponse
+
+    return FileResponse(filepath, media_type="audio/wav", filename=filename)
+
 
 # 全局TTS服务执行器
 tts_executor = TTSWebServerExecutor(
@@ -72,6 +110,9 @@ tts_executor = TTSWebServerExecutor(
 
 # 全局TTS缓冲会话管理器
 tts_buffer_sessions = {}
+# 全局变量，存储音频处理器和ASR客户端
+asr_sessions = {}
+asr_client = ASROnlineClientExecutor()
 
 
 class TTSBufferSession:
@@ -321,157 +362,6 @@ class TTSBufferSession:
         }
 
 
-class WebASRSession:
-    def __init__(
-        self, session_id, asr_server_ip=None, asr_server_port=None, endpoint=None
-    ):
-        self.session_id = session_id
-        # 使用配置文件中的默认值
-        self.asr_server_ip = asr_server_ip or ASR_SERVER_CONFIG["default_ip"]
-        self.asr_server_port = asr_server_port or ASR_SERVER_CONFIG["default_port"]
-        self.endpoint = endpoint or ASR_SERVER_CONFIG["endpoint"]
-
-        self.asr_handler = ASRWsAudioHandler(
-            url=self.asr_server_ip,
-            port=self.asr_server_port,
-            endpoint=self.endpoint,
-        )
-        self.web_audio_handler = self.asr_handler.create_web_audio_handler()
-        self.is_processing = False
-        self.loop = None
-        self.thread = None
-
-        # 音频数据缓存用于保存WAV文件
-        self.audio_data_buffer = []
-        self.sample_rate = 16000  # 默认采样率
-        self.channels = 1  # 单声道
-        self.sample_width = 2  # 16-bit audio (2 bytes per sample)
-
-    def start_asr_processing(self):
-        """在单独线程中启动ASR处理"""
-        if self.is_processing:
-            return
-
-        self.is_processing = True
-        self.thread = threading.Thread(target=self._run_asr_async)
-        self.thread.start()
-
-    def _run_asr_async(self):
-        """异步运行ASR处理"""
-        try:
-            # 创建新的事件循环
-            self.loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.loop)
-
-            # 定义实时结果回调函数
-            def real_time_callback(result, result_type="partial"):
-                # 发送实时结果到前端
-                async def send_result():
-                    await sio.emit(
-                        "asr_partial_result",
-                        {
-                            "result": result,
-                            "type": result_type,
-                            "session_id": self.session_id,
-                            "timestamp": time.time(),
-                        },
-                        room=self.session_id,
-                    )
-
-                asyncio.run_coroutine_threadsafe(send_result(), self.loop)
-
-            # 运行ASR处理，传入回调函数
-            result = self.loop.run_until_complete(
-                self.asr_handler.run_web_audio(
-                    self.web_audio_handler, real_time_callback
-                )
-            )
-
-            # 发送最终结果到前端
-            async def send_final_result():
-                await sio.emit(
-                    "asr_result",
-                    {
-                        "status": "completed",
-                        "result": result.get("result", "") if result else "",
-                        "session_id": self.session_id,
-                    },
-                    room=self.session_id,
-                )
-
-            # asyncio.run_coroutine_threadsafe(send_final_result(), self.loop)
-            self.loop.run_until_complete(send_final_result())
-
-        except Exception as e:
-            print(f"ASR processing error: {e}")
-
-            async def send_error():
-                await sio.emit(
-                    "asr_error",
-                    {"error": str(e), "session_id": self.session_id},
-                    room=self.session_id,
-                )
-
-            asyncio.run_coroutine_threadsafe(send_error(), self.loop)
-        finally:
-            self.is_processing = False
-            if self.loop:
-                self.loop.close()
-
-    def add_audio_data(self, audio_data):
-        """添加音频数据"""
-        if self.web_audio_handler:
-            self.web_audio_handler.add_audio_data(audio_data)
-
-        # 将音频数据添加到缓存中用于保存WAV文件
-        self.audio_data_buffer.append(audio_data)
-
-    def save_audio_as_wav(self, filename=None):
-        """将收集的音频数据保存为WAV文件"""
-        if not self.audio_data_buffer:
-            print("No audio data to save")
-            return None
-
-        try:
-            # 确保saved_audio目录存在
-            save_dir = "saved_audio"
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
-
-            # 生成文件名
-            if filename is None:
-                timestamp = int(time.time() * 1000)  # 毫秒时间戳
-                filename = f"{self.session_id}_{timestamp}.wav"
-
-            filepath = os.path.join(save_dir, filename)
-
-            # 合并所有音频数据
-            combined_audio_data = b"".join(self.audio_data_buffer)
-
-            # 保存为WAV文件
-            with wave.open(filepath, "wb") as wav_file:
-                wav_file.setnchannels(self.channels)
-                wav_file.setsampwidth(self.sample_width)
-                wav_file.setframerate(self.sample_rate)
-                wav_file.writeframes(combined_audio_data)
-
-            print(f"Audio saved as: {filepath}")
-            return filepath
-
-        except Exception as e:
-            print(f"Error saving audio as WAV: {e}")
-            return None
-
-    def stop_processing(self):
-        """停止处理"""
-        self.is_processing = False
-        if self.web_audio_handler:
-            self.web_audio_handler.stop()
-
-        # 在停止处理时保存音频文件
-        self.save_audio_as_wav()
-
-
 @sio.event
 async def connect(sid, environ):
     """客户端连接"""
@@ -499,23 +389,78 @@ async def disconnect(sid):
         del tts_buffer_sessions[sid]
 
 
+"""
+ASR 相关事件处理
+"""
+
+
 @sio.event
 async def start_asr(sid):
     """开始ASR处理"""
     print(f"Starting ASR for session: {sid}")
-
-    # 从客户端数据中获取服务器配置，如果没有则使用默认配置
-    server_ip = None
-    server_port = None
-
-    # 创建新的ASR会话
-    asr_session = WebASRSession(sid, server_ip, server_port)
+    asr_session = WebSocketAudioHandler(sample_rate=16000, chunk_size=1024)
     asr_sessions[sid] = asr_session
 
-    # 开始ASR处理
-    asr_session.start_asr_processing()
+    asr_session.start_processing()
+    asyncio.create_task(process_asr_async(sid, asr_sessions[sid]))
+    print(f"Started recording for client {sid}")
 
     await sio.emit("asr_started", {"session_id": sid}, room=sid)
+
+
+async def process_asr_async(sid, audio_handler):
+    """异步处理ASR"""
+    try:
+        # 定义实时结果回调函数
+        def real_time_callback(result, result_type="partial"):
+            # 发送实时结果到前端
+            async def send_result():
+                await sio.emit(
+                    "asr_partial_result",
+                    {
+                        "result": result,
+                        "type": result_type,
+                        "session_id": sid,
+                    },
+                    room=sid,
+                )
+
+            asyncio.run_coroutine_threadsafe(send_result(), loop)
+
+        # 在线程池中运行阻塞的ASR处理
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            lambda: asr_client.process_websocket_audio(
+                audio_handler=audio_handler,
+                server_ip=ASR_SERVER_CONFIG["default_ip"],
+                port=ASR_SERVER_CONFIG["default_port"],
+                real_time_callback=real_time_callback,
+            ),
+        )
+
+        # 发送最终结果到前端
+        await sio.emit(
+            "asr_result",
+            {
+                "status": "completed",
+                "result": result,
+                "session_id": sid,
+            },
+            room=sid,
+        )
+        print(f"Final result for {sid}: {result}")
+
+        # # 保存音频文件
+        # saved_file = audio_handler.save_audio_to_file()
+        # if saved_file:
+        #     print(f"Client {sid} 音频已保存: {saved_file}")
+
+    except Exception as e:
+        print(f"ASR processing error: {e}")
+        await sio.emit(
+            "error", {"message": f"ASR processing error: {str(e)}"}, room=sid
+        )
 
 
 @sio.event
@@ -526,24 +471,17 @@ async def audio_data(sid, data):
         return
 
     try:
-        # 解码音频数据
-        if "audio" in data:
-            audio_bytes = None
-            if isinstance(data["audio"], bytes):
-                audio_bytes = data["audio"]  # ← 无需任何转换！
-                asr_sessions[sid].add_audio_data(audio_bytes)
-
-                # 打印音频数据统计信息
-                buffer_count = len(asr_sessions[sid].audio_data_buffer)
-                total_bytes = sum(
-                    len(chunk) for chunk in asr_sessions[sid].audio_data_buffer
-                )
-                print(
-                    f"Session {sid}: Buffer chunks: {buffer_count}, Total bytes: {total_bytes}"
-                )
-            else:
-                print(f"Unsupported audio data format: {type(data['audio'])}")
-                return
+        # 从前端接收的是base64编码的音频数据
+        if isinstance(data, dict) and "audio" in data:
+            # 解码base64音频数据
+            audio_bytes = base64.b64decode(data["audio"])
+            # 添加到音频处理器
+            asr_sessions[sid].add_audio_data(audio_bytes)
+        elif isinstance(data, bytes):
+            # 直接是字节数据
+            asr_sessions[sid].add_audio_data(data)
+        else:
+            print(f"Unexpected audio data format from {sid}: {type(data)}")
 
     except Exception as e:
         print(f"Error processing audio data: {e}")
@@ -556,46 +494,16 @@ async def audio_data(sid, data):
 async def stop_asr(sid):
     """停止ASR处理"""
     if sid in asr_sessions:
-        # 停止处理（这会自动保存音频文件）
-        asr_sessions[sid].stop_processing()
+        asr_session = asr_sessions[sid]
+        asr_session.stop_processing()
         await sio.emit("asr_stopped", {"session_id": sid}, room=sid)
 
-
-@sio.event
-async def save_audio(sid, data=None):
-    """手动保存当前会话的音频数据"""
-    if sid not in asr_sessions:
-        await sio.emit("error", {"message": "ASR session not found"}, room=sid)
-        return
-
-    try:
-        filename = data.get("filename") if data else None
-        filepath = asr_sessions[sid].save_audio_as_wav(filename)
-
-        if filepath:
-            await sio.emit(
-                "audio_saved",
-                {
-                    "session_id": sid,
-                    "filepath": filepath,
-                    "message": f"Audio saved successfully to {filepath}",
-                },
-                room=sid,
-            )
-        else:
-            await sio.emit("error", {"message": "Failed to save audio file"}, room=sid)
-
-    except Exception as e:
-        print(f"Error saving audio: {e}")
-        await sio.emit("error", {"message": f"Error saving audio: {str(e)}"}, room=sid)
+    else:
+        await sio.emit("error", {"message": "音频处理器未找到"}, room=sid)
 
 
 """
-客户端能传入文本片段，需要在服务端缓冲区进行拼接，分句合成音频
-
-服务端可能存在未满足分句条件的缓存文本，
-需要在文本流发送结束后立刻发送停止语音合成，
-并且合成所有缓存文本的指令，否则有可能丢失文本。
+TTS 相关事件处理
 """
 
 
