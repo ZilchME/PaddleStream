@@ -328,15 +328,3 @@ class TTSWebServerExecutor:
 
         result = await session.synthesize_text_stream(text, spk_id)
         return result
-
-
-if __name__ == "__main__":
-    ttsclient_executor = TTSOnlineClientExecutor()
-    res = ttsclient_executor(
-        input="测试语音合成",
-        server_ip="127.0.0.1",
-        port=8090,
-        spk_id=0,
-        output="tts_output.wav",
-        play=False,
-    )
