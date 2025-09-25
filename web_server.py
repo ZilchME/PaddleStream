@@ -34,6 +34,7 @@ sio = socketio.AsyncServer(
 )
 socket_app = socketio.ASGIApp(sio, app, socketio_path=SOCKETIO_PATH)
 
+
 # 全局TTS服务执行器
 tts_executor = TTSWebServerExecutor(
     server_ip=TTS_SERVER_CONFIG["default_ip"], port=TTS_SERVER_CONFIG["default_port"]
@@ -65,6 +66,7 @@ class TTSBufferSession:
         self.is_processing = False
         self.synthesis_thread = None
         self.stop_synthesis = False
+        self.stop_accepting_new_text = False  # 新增：停止接受新文本标志
 
         # 合成锁将在工作线程中创建
         self.synthesis_lock = None
@@ -91,6 +93,11 @@ class TTSBufferSession:
         Returns:
             List[str]: 本次提取出的完整句子列表
         """
+        # 如果已停止接受新文本，直接返回空列表
+        if self.stop_accepting_new_text:
+            print(f"会话 {self.session_id} 已停止接受新文本")
+            return []
+
         self.text_buffer += text
 
         # 检查缓冲区大小
@@ -297,7 +304,6 @@ class TTSBufferSession:
 async def connect(sid, environ):
     """客户端连接"""
     print(f"Client connected: {sid}")
-    await sio.emit("connected", {"session_id": sid}, room=sid)
 
 
 @sio.event
@@ -311,13 +317,22 @@ async def disconnect(sid):
         asr_sessions[sid].stop_processing()
         del asr_sessions[sid]
 
-    # 清理TTS会话
-    tts_executor.remove_session(sid)
-
-    # 清理TTS缓冲会话
+    # 清理TTS会话 - 允许当前合成完成
     if sid in tts_buffer_sessions:
-        tts_buffer_sessions[sid].stop_processing()
-        del tts_buffer_sessions[sid]
+        buffer_session = tts_buffer_sessions[sid]
+        if buffer_session.is_processing:
+            print(f"等待TTS会话 {sid} 的剩余合成完成...")
+            # 停止接受新文本，但等待当前合成完成
+            buffer_session.stop_accepting_new_text = True
+            # 创建异步任务等待完成，避免阻塞disconnect
+            asyncio.create_task(_graceful_tts_session_cleanup(sid))
+        else:
+            # 没有正在进行的合成，直接清理
+            buffer_session.stop_processing()
+            del tts_buffer_sessions[sid]
+
+    # 清理普通TTS会话
+    tts_executor.remove_session(sid)
 
 
 """
@@ -588,6 +603,94 @@ async def _wait_for_synthesis_completion(sid: str, session: TTSBufferSession):
     await sio.emit("stream_tts_finished", {"session_id": sid}, room=sid)
 
 
+async def _graceful_tts_session_cleanup(sid: str):
+    """优雅地清理TTS会话 - 等待当前合成完成"""
+    if sid not in tts_buffer_sessions:
+        return
+
+    buffer_session = tts_buffer_sessions[sid]
+    max_wait_time = 30  # 最多等待30秒
+    wait_time = 0
+
+    print(f"开始优雅清理TTS会话 {sid}...")
+
+    # 等待当前正在合成的句子完成
+    while (
+        buffer_session.current_synthesizing_sentence is not None
+        and wait_time < max_wait_time
+    ):
+        await asyncio.sleep(0.5)
+        wait_time += 0.5
+
+    # 检查是否还有未处理的句子
+    if not buffer_session.pending_sentences.empty():
+        print(
+            f"会话 {sid} 还有 {buffer_session.pending_sentences.qsize()} 个待合成句子，继续等待..."
+        )
+
+        # 等待所有句子完成
+        while not buffer_session.is_finished() and wait_time < max_wait_time:
+            await asyncio.sleep(0.5)
+            wait_time += 0.5
+
+    # 清理会话
+    if sid in tts_buffer_sessions:
+        if wait_time >= max_wait_time:
+            print(f"TTS会话 {sid} 清理超时，强制停止")
+        else:
+            print(f"TTS会话 {sid} 清理完成，用时 {wait_time:.1f}s")
+
+        tts_buffer_sessions[sid].stop_processing()
+        del tts_buffer_sessions[sid]
+
+
+async def _wait_and_stop_tts_session(sid: str):
+    """等待TTS会话完成合成后停止"""
+    if sid not in tts_buffer_sessions:
+        return
+
+    buffer_session = tts_buffer_sessions[sid]
+    max_wait_time = 60  # 最多等待60秒
+    wait_time = 0
+
+    print(f"等待TTS会话 {sid} 完成合成...")
+
+    # 等待所有句子合成完毕
+    while not buffer_session.is_finished() and wait_time < max_wait_time:
+        await asyncio.sleep(0.5)
+        wait_time += 0.5
+
+        # 每5秒发送一次状态更新
+        if wait_time % 5.0 == 0:
+            status = buffer_session.get_status()
+            await sio.emit(
+                "tts_stop_progress",
+                {
+                    "session_id": sid,
+                    "pending_sentences": status["pending_sentences"],
+                    "processed_sentences": status["processed_sentences"],
+                    "current_sentence": status.get("current_synthesizing_sentence"),
+                },
+                room=sid,
+            )
+
+    # 停止会话
+    if sid in tts_buffer_sessions:
+        if wait_time >= max_wait_time:
+            print(f"TTS会话 {sid} 等待超时，强制停止")
+            await sio.emit(
+                "tts_force_stopped",
+                {"session_id": sid, "message": "等待超时，强制停止"},
+                room=sid,
+            )
+        else:
+            print(f"TTS会话 {sid} 正常完成，用时 {wait_time:.1f}s")
+
+        buffer_session.stop_processing()
+        del tts_buffer_sessions[sid]
+        await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
+
+
 @sio.event
 async def get_tts_status(sid):
     """获取TTS会话状态"""
@@ -611,19 +714,35 @@ async def stop_tts(sid):
     # 停止普通TTS会话
     tts_executor.remove_session(sid)
 
-    # 停止流式TTS缓冲会话
+    # 停止流式TTS缓冲会话 - 支持graceful shutdown
     if sid in tts_buffer_sessions:
-        tts_buffer_sessions[sid].stop_processing()
-        del tts_buffer_sessions[sid]
+        buffer_session = tts_buffer_sessions[sid]
 
-    await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
+        # 停止接受新文本
+        buffer_session.stop_accepting_new_text = True
 
+        # 检查是否有正在进行的合成
+        if (
+            buffer_session.current_synthesizing_sentence is not None
+            or not buffer_session.pending_sentences.empty()
+        ):
+            # 通知客户端正在等待合成完成
+            await sio.emit(
+                "tts_graceful_stop",
+                {
+                    "session_id": sid,
+                    "message": "等待当前合成完成...",
+                    "pending_sentences": buffer_session.pending_sentences.qsize(),
+                },
+                room=sid,
+            )
 
-if __name__ == "__main__":
-    print("Starting Web ASR Server...")
-    print(f"Open http://localhost:{WEB_SERVER_CONFIG['port']} in your browser")
-    uvicorn.run(
-        socket_app,
-        host=WEB_SERVER_CONFIG["host"],
-        port=WEB_SERVER_CONFIG["port"],
-    )
+            # 创建异步任务等待完成
+            asyncio.create_task(_wait_and_stop_tts_session(sid))
+        else:
+            # 没有进行中的合成，直接停止
+            buffer_session.stop_processing()
+            del tts_buffer_sessions[sid]
+            await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
+    else:
+        await sio.emit("tts_stopped", {"session_id": sid}, room=sid)

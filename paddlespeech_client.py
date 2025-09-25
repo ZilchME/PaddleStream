@@ -1,6 +1,9 @@
 import asyncio
 import json
 import time
+import asyncio
+import json
+import time
 from typing import Callable, Optional
 
 from audio_hander import ASRWsAudioHandler, WebSocketAudioHandler, TTSWsHandler
@@ -218,13 +221,7 @@ class WebTTSSession:
                         end_time = time.time()
                         total_time = end_time - start_time
 
-                        # 发送结束请求
-                        end_request = json.dumps(
-                            {"task": "tts", "signal": "end", "session": session}
-                        )
-                        await ws.send(end_request)
-
-                        # 发送完成信号到客户端
+                        # 先发送完成信号到客户端，确保客户端接收到所有音频数据
                         if self.stream_callback:
                             await self.stream_callback(
                                 {
@@ -235,6 +232,15 @@ class WebTTSSession:
                                     "first_chunk_time": first_chunk_time,
                                 }
                             )
+
+                        # 给客户端一些时间处理完成信号
+                        await asyncio.sleep(0.1)
+
+                        # 然后发送结束请求到TTS服务器
+                        end_request = json.dumps(
+                            {"task": "tts", "signal": "end", "session": session}
+                        )
+                        await ws.send(end_request)
 
                         return {
                             "status": "completed",
