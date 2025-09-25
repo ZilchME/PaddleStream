@@ -1,0 +1,94 @@
+# This is the parameter configuration file for PaddleSpeech Serving.
+
+#################################################################################
+#                             SERVER SETTING                                    #
+#################################################################################
+host: 0.0.0.0
+port: 8090
+
+# The task format in the engin_list is: <speech task>_<engine type>
+# task choices = ['asr_online']
+# protocol = ['websocket'] (only one can be selected).
+# websocket only support online engine type.
+protocol: "websocket"
+engine_list: ["asr_online", "tts_online-onnx"]
+
+#################################################################################
+#                                ENGINE CONFIG                                  #
+#################################################################################
+
+################################### ASR #########################################
+################### speech task: asr; engine_type: online #######################
+asr_online:
+  model_type: "conformer_u2pp_online_wenetspeech"
+  am_model: # the pdmodel file of am static model [optional]
+  am_params: # the pdiparams file of am static model [optional]
+  lang: "zh"
+  sample_rate: 16000
+  cfg_path:
+  num_decoding_left_chunks: -1
+  force_yes: True
+  device: "gpu:0" # cpu or gpu:id
+  decode_method: "attention_rescoring"
+  continuous_decoding: True # enable continue decoding when endpoint detected
+
+  am_predictor_conf:
+    device: "gpu:0" # set 'gpu:id' or 'cpu'
+    switch_ir_optim: True
+    glog_info: False # True -> print glog
+    summary: True # False -> do not show predictor config
+
+  chunk_buffer_conf:
+    window_n: 7 # frame
+    shift_n: 4 # frame
+    window_ms: 25 # ms
+    shift_ms: 10 # ms
+    sample_rate: 16000
+    sample_width: 2
+
+#################################################################################
+#                                ENGINE CONFIG                                  #
+#################################################################################
+
+################################### TTS #########################################
+################### speech task: tts; engine_type: online-onnx #######################
+tts_online-onnx:
+  # am (acoustic model) choices=['fastspeech2_csmsc_onnx', 'fastspeech2_cnndecoder_csmsc_onnx']
+  # fastspeech2_cnndecoder_csmsc_onnx support streaming am infer.
+  am: "fastspeech2_cnndecoder_csmsc_onnx"
+  # am_ckpt is a list, if am is fastspeech2_cnndecoder_csmsc_onnx, am_ckpt = [encoder model, decoder model, postnet model];
+  # if am is fastspeech2_csmsc_onnx, am_ckpt = [ckpt model];
+  am_ckpt: # list
+  am_stat:
+  phones_dict:
+  tones_dict:
+  speaker_dict:
+  am_sample_rate: 24000
+  am_sess_conf:
+    device: "gpu:0" # set 'gpu:id' or 'cpu'
+    use_trt: False
+    cpu_threads: 4
+
+  # voc (vocoder) choices=['mb_melgan_csmsc_onnx, hifigan_csmsc_onnx']
+  # Both mb_melgan_csmsc_onnx and hifigan_csmsc_onnx support streaming voc inference
+  voc: "mb_melgan_csmsc_onnx"
+  voc_ckpt:
+  voc_sample_rate: 24000
+  voc_sess_conf:
+    device: "gpu:0" # set 'gpu:id' or 'cpu'
+    use_trt: False
+    cpu_threads: 4
+
+  # others
+  lang: "zh"
+  # am_block and am_pad only for fastspeech2_cnndecoder_onnx model to streaming am infer,
+  # when am_pad set 12, streaming synthetic audio is the same as non-streaming synthetic audio
+  am_block: 72
+  am_pad: 12
+  # voc_pad and voc_block voc model to streaming voc infer,
+  # when voc model is mb_melgan_csmsc_onnx, voc_pad set 14, streaming synthetic audio is the same as non-streaming synthetic audio; The minimum value of pad can be set to 7, streaming synthetic audio sounds normal
+  # when voc model is hifigan_csmsc_onnx, voc_pad set 19, streaming synthetic audio is the same as non-streaming synthetic audio; voc_pad set 14, streaming synthetic audio sounds normal
+  voc_block: 36
+  voc_pad: 14
+  # voc_upsample should be same as n_shift on voc config.
+  voc_upsample: 300
