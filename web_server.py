@@ -108,13 +108,18 @@ class TTSBufferSession:
             # 正常分句处理
             sentences = self._extract_sentences()
 
-        # 将提取的句子加入待合成队列
+        # 将提取的句子加入待合成队列，并移除英文字母以及部分特殊字符
+        filtered_sentences = []
+        pattern = re.compile(r"[a-zA-Z_\"'`]")
         for sentence in sentences:
-            if sentence.strip():  # 忽略空字符串
-                self.pending_sentences.put(sentence.strip())
+            # 先移除指定字符
+            cleaned = pattern.sub("", sentence).strip()
+            if cleaned:
+                filtered_sentences.append(cleaned)
+                self.pending_sentences.put(cleaned)
                 self.total_sentences += 1
 
-        return sentences
+        return filtered_sentences
 
     def _extract_sentences(self) -> List[str]:
         """从缓冲区提取完整的句子"""
@@ -212,7 +217,7 @@ class TTSBufferSession:
                         if not self.stop_synthesis:  # 再次检查，避免在等待锁期间被停止
                             self.current_synthesizing_sentence = sentence
                             print(
-                                f"开始合成句子 {self.processed_sentences + 1}: {sentence[:50]}..."
+                                f"开始合成句子 {self.processed_sentences + 1}: {sentence[:100]}..."
                             )
 
                             # 执行TTS合成
@@ -221,7 +226,7 @@ class TTSBufferSession:
 
                             self.current_synthesizing_sentence = None
                             print(
-                                f"完成合成句子 {self.processed_sentences}: {sentence[:50]}..."
+                                f"完成合成句子 {self.processed_sentences}: {sentence[:100]}..."
                             )
 
             except Empty:
