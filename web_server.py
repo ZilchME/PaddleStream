@@ -12,9 +12,9 @@ from urllib.parse import urlparse
 from typing import Optional, List, Callable, Dict, Any
 from queue import Queue, Empty
 from fastapi import FastAPI, Body, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 import socketio
-import uvicorn
 from audio_hander import WebSocketAudioHandler, TextHttpHandler
 from paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
 from config import (
@@ -34,6 +34,19 @@ except Exception:
 
 # 创建 FastAPI 应用
 app = FastAPI()
+
+# 启用 CORS（与 Socket.IO 保持一致的跨域来源设置）
+_allowed_origins = SOCKETIO_CONFIG.get("cors_allowed_origins", ["*"])
+if isinstance(_allowed_origins, str):
+    _allowed_origins = ["*"] if _allowed_origins == "*" else [_allowed_origins]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_allowed_origins or ["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 sio = socketio.AsyncServer(
     async_mode=SOCKETIO_CONFIG["async_mode"],
     cors_allowed_origins=SOCKETIO_CONFIG["cors_allowed_origins"],
@@ -103,7 +116,7 @@ class TTSBufferSession:
         self.pending_sentences = Queue()  # 待合成的句子队列
 
         # 分句规则：中文句号、英文句号、问号、感叹号、换行符
-        self.sentence_endings = re.compile(r"[。！？\.\!\?\n]+")
+        self.sentence_endings = re.compile(r"[。！？；：;:\.\!\?\n]+")
 
         # 合成状态
         self.is_processing = False
@@ -191,7 +204,7 @@ class TTSBufferSession:
         # 如果缓冲区仍然过大，按固定长度分割
         if len(self.text_buffer) > self.max_buffer_size // 2:
             # 按逗号、分号等标点分割
-            comma_parts = re.split(r"[，,；;]", self.text_buffer)
+            comma_parts = re.split(r"[，,；;：:]", self.text_buffer)
             if len(comma_parts) > 1:
                 sentences.extend(comma_parts[:-1])
                 self.text_buffer = comma_parts[-1]
