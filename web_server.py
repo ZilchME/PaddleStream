@@ -2,17 +2,11 @@ import asyncio
 import base64
 import re
 import threading
-
-import os
 from datetime import datetime
-
 
 from typing import Optional, List, Callable, Dict, Any
 from queue import Queue, Empty
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
+from fastapi import FastAPI
 
 import socketio
 import uvicorn
@@ -110,7 +104,7 @@ class TTSBufferSession:
 
         # 将提取的句子加入待合成队列，并移除英文字母以及部分特殊字符
         filtered_sentences = []
-        pattern = re.compile(r"[a-zA-Z_\"'`]")
+        pattern = re.compile(r"[a-zA-Z_\"'`:（）()<>《》【】\[\]{}]+")
         for sentence in sentences:
             # 先移除指定字符
             cleaned = pattern.sub("", sentence).strip()
@@ -402,11 +396,6 @@ async def process_asr_async(sid, audio_handler):
         )
         print(f"Final result for {sid}: {result}")
 
-        # # 保存音频文件
-        # saved_file = audio_handler.save_audio_to_file()
-        # if saved_file:
-        #     print(f"Client {sid} 音频已保存: {saved_file}")
-
     except Exception as e:
         print(f"ASR processing error: {e}")
         await sio.emit(
@@ -448,7 +437,6 @@ async def stop_asr(sid):
         asr_session = asr_sessions[sid]
         asr_session.stop_processing()
         await sio.emit("asr_stopped", {"session_id": sid}, room=sid)
-
     else:
         await sio.emit("error", {"message": "音频处理器未找到"}, room=sid)
 

@@ -22,3 +22,9 @@ SOCKETIO_CONFIG = {"cors_allowed_origins": "*", "async_mode": "asgi"}
 
 # Socket.IO 路径配置
 SOCKETIO_PATH = "/socket.io/"
+
+# LLM API 配置
+LLM_API_CONFIG = {
+    "url": "http://10.229.33.207:48080/stream",  # 请根据实际情况修改
+    "timeout": 120,
+}
