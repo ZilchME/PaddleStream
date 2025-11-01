@@ -4,8 +4,6 @@
 
 对百度飞桨 [PaddleSpeech](https://github.com/PaddlePaddle/PaddleSpeech/) 服务进行二次封装，支持流式实时语音识别，支持文本逐字输入的流式语音合成。
 
-**新增功能**: 支持 LLM SSE 流式响应处理,后端统一处理 SSE 并通过 WebSocket 实时转发给前端。
-
 ### 主要功能
 
 1. **流式语音识别 (ASR)**: 实时处理音频流并返回识别结果
@@ -39,7 +37,6 @@ pip install -r requirements.txt
 - fastapi: Web 框架
 - uvicorn: ASGI 服务器
 - python-socketio: WebSocket 支持
-- aiohttp: HTTP 异步客户端 (用于 LLM SSE 处理)
 
 ### 配置说明
 
@@ -49,7 +46,6 @@ pip install -r requirements.txt
 # LLM API 配置 (新增)
 LLM_API_CONFIG = {
     "url": "http://your-llm-api-url/api/stream",  # 修改为你的LLM API地址
-    "timeout": 60,  # 请求超时时间(秒)
 }
 
 # ASR服务器配置
@@ -92,7 +88,7 @@ python main.py
 - `stop_tts`: 停止TTS合成
 - `tts_stream_audio`: 接收TTS音频流
 
-#### LLM 相关事件 (新增)
+#### LLM 相关事件
 
 - `send_llm_message`: 发送消息给LLM并接收流式响应
 - `llm_stream_start`: LLM流式响应开始
@@ -104,6 +100,33 @@ python main.py
 详细的 LLM WebSocket 使用文档请查看: [LLM_WEBSOCKET_GUIDE.md](./LLM_WEBSOCKET_GUIDE.md)
 
 ### 使用示例
+### 文本标点接口
+
+提供两种方式为文本添加标点：
+
+- HTTP 接口：
+
+    - 路径：`POST /paddlespeech/text/punctuate`
+    - 请求体：`{"text": "待添加标点的文本"}`
+    - 响应体：`{"result": {"punc_text": "带标点文本"}}`
+
+    示例：
+
+    ```bash
+    curl -X POST \
+        -H 'Content-Type: application/json' \
+        -d '{"text":"你好 我们今天开会讨论方案"}' \
+        http://127.0.0.1:8000/paddlespeech/text/punctuate
+    ```
+
+- Socket.IO 事件：
+
+    - 发送事件：`punctuate`，数据：`{"text": "待添加标点的文本"}`
+    - 接收事件：
+        - 成功：`punctuated`，数据：`{"punc_text": str, "session_id": str}`
+        - 失败：`punctuate_error`，数据：`{"error": str}`
+
+标点服务地址可在 `config.py` 中通过 `PUNC_SERVER_CONFIG = {"default_ip": "127.0.0.1", "default_port": 8090}` 配置；若缺省则使用上述默认值。
 
 #### LLM 流式对话示例
 
@@ -172,14 +195,3 @@ socket.on('llm_stream_complete', () => {
     ├─→ PaddleSpeech TTS 服务
     └─→ LLM API (SSE流式响应)
 ```
-
-### 注意事项
-
-1. 确保 PaddleSpeech 服务已启动并正常运行
-2. 配置 `config.py` 中的 LLM API 地址
-3. LLM API 需要支持 SSE (Server-Sent Events) 格式的流式响应
-4. 生产环境建议添加认证和授权机制
-
-### 许可证
-
-请参考 PaddleSpeech 的许可证。

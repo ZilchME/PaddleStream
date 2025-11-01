@@ -17,6 +17,14 @@ TTS_SERVER_CONFIG = {
     "endpoint": "/paddlespeech/tts/streaming",
 }
 
+# PUNC服务器配置
+# 可选，如果不使用标点服务，可以将 default_ip 和 default_port 设置为 None
+# 或者不设置该选项
+PUNC_SERVER_CONFIG = {
+    "default_ip": "10.229.33.207",
+    "default_port": 8190,
+}
+
 # Socket.IO 配置
 SOCKETIO_CONFIG = {"cors_allowed_origins": "*", "async_mode": "asgi"}
 

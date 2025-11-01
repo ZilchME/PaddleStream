@@ -2,15 +2,20 @@ import asyncio
 import base64
 import re
 import threading
-from datetime import datetime
+import json
+import time
+import http.client
+import codecs
+from urllib.parse import urlparse
+
 
 from typing import Optional, List, Callable, Dict, Any
 from queue import Queue, Empty
-from fastapi import FastAPI
+from fastapi import FastAPI, Body, HTTPException
 
 import socketio
 import uvicorn
-from audio_hander import WebSocketAudioHandler
+from audio_hander import WebSocketAudioHandler, TextHttpHandler
 from paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
 from config import (
     ASR_SERVER_CONFIG,
@@ -18,7 +23,14 @@ from config import (
     WEB_SERVER_CONFIG,
     SOCKETIO_CONFIG,
     SOCKETIO_PATH,
+    LLM_API_CONFIG,
 )
+
+# 尝试读取标点服务配置，若不存在则使用默认值
+try:
+    from config import PUNC_SERVER_CONFIG  # type: ignore
+except Exception:
+    PUNC_SERVER_CONFIG = {"default_ip": None, "default_port": None}
 
 # 创建 FastAPI 应用
 app = FastAPI()
@@ -33,6 +45,43 @@ socket_app = socketio.ASGIApp(sio, app, socketio_path=SOCKETIO_PATH)
 tts_executor = TTSWebServerExecutor(
     server_ip=TTS_SERVER_CONFIG["default_ip"], port=TTS_SERVER_CONFIG["default_port"]
 )
+
+# 全局标点服务客户端
+punc_client = TextHttpHandler(
+    server_ip=PUNC_SERVER_CONFIG.get("default_ip"),
+    port=PUNC_SERVER_CONFIG.get("default_port"),
+)
+
+
+"""
+文本标点相关 HTTP 接口
+"""
+
+
+@app.post("/paddlespeech/text/punctuate")
+async def punctuate_text(body: Dict[str, Any] = Body(...)):
+    """为输入文本添加标点。
+
+    Request JSON:
+    {"text": "待添加标点的文本"}
+
+    Response JSON:
+    {"result": {"punc_text": "带标点文本"}}
+    """
+    text = (body or {}).get("text", "")
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=400, detail="'text' 字段不能为空")
+
+    loop = asyncio.get_running_loop()
+    try:
+        punc_text = await loop.run_in_executor(None, lambda: punc_client.run(text))
+    except Exception as e:
+        # 发生异常时，回退为原文本并返回提示
+        punc_text = text
+        return {"result": {"punc_text": punc_text}, "warning": str(e)}
+
+    return {"result": {"punc_text": punc_text}}
+
 
 # 全局TTS缓冲会话管理器
 tts_buffer_sessions = {}
@@ -104,7 +153,7 @@ class TTSBufferSession:
 
         # 将提取的句子加入待合成队列，并移除英文字母以及部分特殊字符
         filtered_sentences = []
-        pattern = re.compile(r"[a-zA-Z_\"'`:（）()<>《》【】\[\]{}]+")
+        pattern = re.compile(r"[a-zA-Z_\"'`:()（）<>《》【】\[\]{}@#$^&*]+")
         for sentence in sentences:
             # 先移除指定字符
             cleaned = pattern.sub("", sentence).strip()
@@ -380,6 +429,8 @@ async def process_asr_async(sid, audio_handler):
                 audio_handler=audio_handler,
                 server_ip=ASR_SERVER_CONFIG["default_ip"],
                 port=ASR_SERVER_CONFIG["default_port"],
+                punc_server_ip=PUNC_SERVER_CONFIG.get("default_ip"),
+                punc_server_port=PUNC_SERVER_CONFIG.get("default_port"),
                 real_time_callback=real_time_callback,
             ),
         )
@@ -739,3 +790,236 @@ async def stop_tts(sid):
             await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
     else:
         await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
+
+
+"""
+LLM SSE 流式处理相关事件
+"""
+
+
+@sio.event
+async def send_llm_message(sid, data):
+    """
+    接收前端消息,通过SSE方式请求LLM API,并通过WebSocket实时转发响应内容
+
+    Args:
+        sid: Socket.IO 会话ID
+        data: 包含以下字段的字典:
+            - input_text: 用户输入的文本
+            - session_id: LLM会话ID (可选)
+            - llm_api_url: LLM API地址 (可选,默认使用配置文件中的地址)
+    """
+    print(f"收到LLM消息请求: {sid}")
+
+    try:
+        input_text = data.get("input_text", "")
+        llm_session_id = data.get("session_id", sid)  # 默认使用socket sid
+
+        if not input_text:
+            await sio.emit("llm_error", {"error": "输入文本不能为空"}, room=sid)
+            return
+
+        # 安全获取 LLM API URL（兼容 LLM_API_CONFIG 为空或缺键的情况）
+        cfg_url = None
+        try:
+            if isinstance(LLM_API_CONFIG, dict):
+                cfg_url = LLM_API_CONFIG.get("url")
+        except Exception:
+            cfg_url = None
+
+        llm_api_url = data.get("llm_api_url") or cfg_url
+
+        if not llm_api_url:
+            await sio.emit(
+                "llm_error",
+                {
+                    "error": "未配置LLM API地址，请在config.py设置 LLM_API_CONFIG['url'] 或在请求中传入 llm_api_url",
+                    "session_id": llm_session_id,
+                },
+                room=sid,
+            )
+            return
+        # 通知前端开始处理
+        await sio.emit("llm_stream_start", {"session_id": llm_session_id}, room=sid)
+
+        # 异步处理SSE流式响应
+        await _process_llm_sse_stream(
+            sid=sid,
+            llm_api_url=llm_api_url,
+            input_text=input_text,
+            llm_session_id=llm_session_id,
+        )
+
+    except Exception as e:
+        print(f"LLM消息处理错误: {e}")
+        await sio.emit("llm_error", {"error": str(e)}, room=sid)
+
+
+async def _process_llm_sse_stream(
+    sid: str, llm_api_url: str, input_text: str, llm_session_id: str
+):
+    """
+    处理LLM的SSE流式响应,模拟前端的处理逻辑
+
+    Args:
+        sid: Socket.IO 会话ID
+        llm_api_url: LLM API地址
+        input_text: 用户输入文本
+        llm_session_id: LLM会话ID
+    """
+    try:
+        # 构造请求数据
+        request_data = {
+            "input": {"human_input": input_text},
+            "config": {
+                "configurable": {
+                    "session_id": llm_session_id,
+                }
+            },
+        }
+
+        # 在后台线程中执行阻塞的HTTP请求与SSE解析，避免阻塞事件循环
+        loop = asyncio.get_running_loop()
+
+        def on_content(content: str):
+            # 在线程中回调，将消息安全地投递到事件循环中
+            asyncio.run_coroutine_threadsafe(
+                sio.emit(
+                    "llm_stream_content",
+                    {"content": content, "session_id": llm_session_id},
+                    room=sid,
+                ),
+                loop,
+            )
+            # 按配置添加极短延迟，帮助前端平滑接收
+            delay = 0
+            if delay > 0:
+                time.sleep(delay)
+
+        def worker():
+            _blocking_sse_post_and_parse(
+                llm_api_url=llm_api_url,
+                request_json=request_data,
+                on_content=on_content,
+            )
+
+        # 等待线程完成
+        await asyncio.to_thread(worker)
+
+        # 发送流式传输完成信号
+        await sio.emit("llm_stream_complete", {"session_id": llm_session_id}, room=sid)
+        print(f"LLM流式响应处理完成: {sid}")
+
+    except Exception as e:
+        print(f"LLM SSE流处理错误: {e}")
+        await sio.emit(
+            "llm_error", {"error": str(e), "session_id": llm_session_id}, room=sid
+        )
+
+
+def _blocking_sse_post_and_parse(
+    llm_api_url: str,
+    request_json: dict,
+    on_content: "Callable[[str], None]",
+    read_chunk_size: int = 1024,
+    timeout: int = 600,
+):
+    """
+    使用标准库发起POST请求并手动解析SSE流，解析到content即调用 on_content。
+
+    注意：该函数为阻塞式，应放在线程中运行。
+    """
+    parsed = urlparse(llm_api_url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname
+    port = parsed.port
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    if not host:
+        raise ValueError(f"无效的LLM_API_URL: {llm_api_url}")
+
+    # 选择连接类型
+    if scheme == "https":
+        conn = http.client.HTTPSConnection(host, port=port, timeout=timeout)
+    elif scheme == "http":
+        conn = http.client.HTTPConnection(host, port=port, timeout=timeout)
+    else:
+        raise ValueError(f"不支持的协议: {scheme}")
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+    }
+
+    body = json.dumps(request_json).encode("utf-8")
+
+    # 发起请求
+    conn.request("POST", path, body=body, headers=headers)
+    resp = conn.getresponse()
+
+    if resp.status != 200:
+        error_text = resp.read().decode("utf-8", errors="ignore")
+        conn.close()
+        raise RuntimeError(f"LLM API请求失败: {resp.status} - {error_text}")
+
+    # 增量解码器，避免UTF-8边界问题
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    buffer = ""
+
+    try:
+        while True:
+            chunk = resp.read(read_chunk_size)
+            if not chunk:
+                break
+
+            buffer += decoder.decode(chunk, final=False)
+
+            # 兼容 \n\n 或 \r\n\r\n 的块分隔
+            event_blocks = re.split(r"(?:\r?\n){2}", buffer)
+
+            if len(event_blocks) > 1:
+                # 处理完整块（保留最后一个作为不完整缓存）
+                for block in event_blocks[:-1]:
+                    block = block.strip()
+                    if not block:
+                        continue
+                    _process_sse_block_sync(block, on_content)
+
+                buffer = event_blocks[-1]
+
+        # 处理剩余数据
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            buffer += tail
+        if buffer.strip():
+            _process_sse_block_sync(buffer.strip(), on_content)
+    finally:
+        conn.close()
+
+
+def _process_sse_block_sync(block: str, on_content: "Callable[[str], None]"):
+    """同步处理单个SSE事件块，提取 data: 行中的JSON并回调 content。"""
+    lines = block.splitlines()
+    # print(f"处理SSE块: {block}...")
+    for line in lines:
+        line = line.strip()
+        if not line or not line.startswith("data:"):
+            continue
+        json_str = re.sub(r"^data:\s*", "", line)
+        if not json_str:
+            continue
+        # 跳过类似 [DONE]
+        if json_str.strip() == "[DONE]":
+            continue
+        try:
+            data = json.loads(json_str)
+        except json.JSONDecodeError:
+            continue
+        content = data.get("content")
+        if content:
+            # print(f"解析到内容: {content[:50]}...")
+            on_content(content)
