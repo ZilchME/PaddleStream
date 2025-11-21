@@ -116,7 +116,7 @@ class TTSBufferSession:
         self.pending_sentences = Queue()  # 待合成的句子队列
 
         # 分句规则：中文句号、英文句号、问号、感叹号、换行符
-        self.sentence_endings = re.compile(r"[。！？；：;:\.\!\?\n]+")
+        self.sentence_endings = re.compile(r"[。！？；;\!\?\n]+")
 
         # 合成状态
         self.is_processing = False
@@ -165,11 +165,17 @@ class TTSBufferSession:
             sentences = self._extract_sentences()
 
         # 将提取的句子加入待合成队列，并移除英文字母以及部分特殊字符
+        
         filtered_sentences = []
-        pattern = re.compile(r"[a-zA-Z_\"'`:()（）<>《》【】\[\]{}@#$^&*]+")
+        pattern = re.compile(r"[a-zA-Z_\"'`<>《》【】\[\]{}@#$^&*]+")
         for sentence in sentences:
             # 先移除指定字符
             cleaned = pattern.sub("", sentence).strip()
+            # 将正斜杠替换为空格
+            if "/" in cleaned:
+                cleaned = cleaned.replace("/", " ")
+            # 规范化：将形如 123,456 或 12,345,678 的大数字中的逗号去除，不影响其它逗号
+            cleaned = re.sub(r"\b(\d{1,3}(?:,\d{3})+)\b", lambda m: m.group(1).replace(",", ""), cleaned)
             if cleaned:
                 filtered_sentences.append(cleaned)
                 self.pending_sentences.put(cleaned)
