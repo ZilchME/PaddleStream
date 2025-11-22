@@ -101,6 +101,8 @@ tts_buffer_sessions = {}
 # 全局变量，存储音频处理器和ASR客户端
 asr_sessions = {}
 asr_client = ASROnlineClientExecutor()
+# 全局LLM流式会话状态，用于支持取消（存放 stop_event 和 conn）
+llm_streams: Dict[str, Dict[str, Any]] = {}
 
 
 class TTSBufferSession:
@@ -165,7 +167,7 @@ class TTSBufferSession:
             sentences = self._extract_sentences()
 
         # 将提取的句子加入待合成队列，并移除英文字母以及部分特殊字符
-        
+
         filtered_sentences = []
         pattern = re.compile(r"[a-zA-Z_\"'`<>《》【】\[\]{}@#$^&*]+")
         for sentence in sentences:
@@ -175,7 +177,11 @@ class TTSBufferSession:
             if "/" in cleaned:
                 cleaned = cleaned.replace("/", " ")
             # 规范化：将形如 123,456 或 12,345,678 的大数字中的逗号去除，不影响其它逗号
-            cleaned = re.sub(r"\b(\d{1,3}(?:,\d{3})+)\b", lambda m: m.group(1).replace(",", ""), cleaned)
+            cleaned = re.sub(
+                r"\b(\d{1,3}(?:,\d{3})+)\b",
+                lambda m: m.group(1).replace(",", ""),
+                cleaned,
+            )
             if cleaned:
                 filtered_sentences.append(cleaned)
                 self.pending_sentences.put(cleaned)
@@ -866,7 +872,7 @@ async def send_llm_message(sid, data):
             sid=sid,
             llm_api_url=llm_api_url,
             input_text=input_text,
-            llm_session_id=llm_session_id,
+            llm_session_id=sid,
         )
 
     except Exception as e:
@@ -900,6 +906,23 @@ async def _process_llm_sse_stream(
         # 在后台线程中执行阻塞的HTTP请求与SSE解析，避免阻塞事件循环
         loop = asyncio.get_running_loop()
 
+        # 如果已有同名会话在运行，先请求取消并关闭已有连接
+        if llm_session_id in llm_streams:
+            prev = llm_streams.get(llm_session_id)
+            try:
+                if prev and prev.get("stop_event"):
+                    prev["stop_event"].set()
+                if prev and prev.get("conn"):
+                    try:
+                        prev["conn"].close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        stop_event = threading.Event()
+        llm_streams[llm_session_id] = {"stop_event": stop_event, "conn": None}
+
         def on_content(content: str):
             # 在线程中回调，将消息安全地投递到事件循环中
             asyncio.run_coroutine_threadsafe(
@@ -916,11 +939,26 @@ async def _process_llm_sse_stream(
                 time.sleep(delay)
 
         def worker():
-            _blocking_sse_post_and_parse(
-                llm_api_url=llm_api_url,
-                request_json=request_data,
-                on_content=on_content,
-            )
+            try:
+                _blocking_sse_post_and_parse(
+                    llm_api_url=llm_api_url,
+                    request_json=request_data,
+                    on_content=on_content,
+                    session_id=llm_session_id,
+                )
+            except Exception as e:
+                # 将错误发送到前端
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        sio.emit(
+                            "llm_error",
+                            {"error": str(e), "session_id": llm_session_id},
+                            room=sid,
+                        ),
+                        loop,
+                    )
+                except Exception:
+                    pass
 
         # 等待线程完成
         await asyncio.to_thread(worker)
@@ -928,6 +966,13 @@ async def _process_llm_sse_stream(
         # 发送流式传输完成信号
         await sio.emit("llm_stream_complete", {"session_id": llm_session_id}, room=sid)
         print(f"LLM流式响应处理完成: {sid}")
+
+        # 清理会话状态
+        try:
+            if llm_session_id in llm_streams:
+                del llm_streams[llm_session_id]
+        except Exception:
+            pass
 
     except Exception as e:
         print(f"LLM SSE流处理错误: {e}")
@@ -940,6 +985,7 @@ def _blocking_sse_post_and_parse(
     llm_api_url: str,
     request_json: dict,
     on_content: "Callable[[str], None]",
+    session_id: Optional[str] = None,
     read_chunk_size: int = 1024,
     timeout: int = 600,
 ):
@@ -967,6 +1013,15 @@ def _blocking_sse_post_and_parse(
     else:
         raise ValueError(f"不支持的协议: {scheme}")
 
+    # 如果提供了 session_id，将 conn 注册到全局状态，方便外部关闭
+    try:
+        if session_id:
+            llm_entry = llm_streams.get(session_id)
+            if llm_entry is not None:
+                llm_entry["conn"] = conn
+    except Exception:
+        pass
+
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
@@ -991,7 +1046,23 @@ def _blocking_sse_post_and_parse(
 
     try:
         while True:
-            chunk = resp.read(read_chunk_size)
+            # 在每次读取前检查是否被请求停止
+            if session_id:
+                entry = llm_streams.get(session_id)
+                if entry and entry.get("stop_event") and entry["stop_event"].is_set():
+                    # 外部请求停止，关闭连接并退出
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+                    break
+
+            try:
+                chunk = resp.read(read_chunk_size)
+            except Exception:
+                # 读取异常（比如连接被关闭），退出循环
+                break
+
             if not chunk:
                 break
 
@@ -1017,7 +1088,17 @@ def _blocking_sse_post_and_parse(
         if buffer.strip():
             _process_sse_block_sync(buffer.strip(), on_content)
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+        # 清理会话中的 conn 引用（如果有）
+        try:
+            if session_id and session_id in llm_streams:
+                llm_streams[session_id]["conn"] = None
+        except Exception:
+            pass
 
 
 def _process_sse_block_sync(block: str, on_content: "Callable[[str], None]"):
@@ -1042,3 +1123,56 @@ def _process_sse_block_sync(block: str, on_content: "Callable[[str], None]"):
         if content:
             # print(f"解析到内容: {content[:50]}...")
             on_content(content)
+
+
+@sio.event
+async def cancel_llm_stream(sid):
+    """取消正在进行的LLM SSE流（按 session_id）。
+
+    接收 JSON: {"session_id": "..."}，若未提供则使用 socket sid 作为 session_id。
+    此接口会设置停止事件并关闭 HTTP 连接，触发后台线程退出。
+    """
+    try:
+        print(f"取消LLM流请求: {sid}")
+        session_id = sid
+
+        entry = llm_streams.get(session_id)
+        if not entry:
+            await sio.emit(
+                "llm_stream_not_found",
+                {
+                    "session_id": session_id,
+                    "message": "LLM stream not found or already finished.",
+                },
+                room=sid,
+            )
+            return
+
+        # 请求停止并关闭连接
+        try:
+            if entry.get("stop_event"):
+                entry["stop_event"].set()
+            if entry.get("conn"):
+                try:
+                    entry["conn"].close()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"Error while cancelling LLM stream {session_id}: {e}")
+
+        # 删除全局记录
+        try:
+            if session_id in llm_streams:
+                del llm_streams[session_id]
+        except Exception:
+            pass
+
+        await sio.emit(
+            "llm_stream_cancelled",
+            {"session_id": session_id, "message": "Cancelled"},
+            room=sid,
+        )
+
+    except Exception as e:
+        print(f"cancel_llm_stream error: {e}")
+        await sio.emit("llm_error", {"error": str(e)}, room=sid)
