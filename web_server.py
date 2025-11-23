@@ -6,13 +6,16 @@ import json
 import time
 import http.client
 import codecs
+import os
 from urllib.parse import urlparse
+from datetime import datetime
 
 
 from typing import Optional, List, Callable, Dict, Any
 from queue import Queue, Empty
 from fastapi import FastAPI, Body, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 import socketio
 from audio_hander import WebSocketAudioHandler, TextHttpHandler
@@ -31,6 +34,49 @@ try:
     from config import PUNC_SERVER_CONFIG  # type: ignore
 except Exception:
     PUNC_SERVER_CONFIG = {"default_ip": None, "default_port": None}
+
+# 纠错配置文件路径
+CONFIG_FILE = "correction_config.json"
+
+# 纠错配置数据模型
+class CorrectionConfig(BaseModel):
+    homophoneCorrections: Dict[str, List[str]]
+    domainKeywords: List[str]
+    updatedAt: Optional[str] = None
+
+# 默认纠错配置
+DEFAULT_CORRECTION_CONFIG = {
+    "homophoneCorrections": {
+        "石化地图": ["实话地图", "是画地图"],
+        "北斗中心": ["北斗重新"]
+    },
+    "domainKeywords": [
+        "北斗", "基站", "终端", "定位", "导航", "卫星", "石化地图"
+    ]
+}
+
+# 辅助函数:读取纠错配置
+def load_correction_config() -> dict:
+    """从文件加载纠错配置,如果文件不存在则返回默认配置"""
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"读取纠错配置文件失败: {e}")
+            return DEFAULT_CORRECTION_CONFIG
+    return DEFAULT_CORRECTION_CONFIG
+
+# 辅助函数:保存纠错配置
+def save_correction_config(config: dict) -> bool:
+    """保存纠错配置到文件"""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"保存纠错配置文件失败: {e}")
+        return False
 
 # 创建 FastAPI 应用
 app = FastAPI()
@@ -94,6 +140,54 @@ async def punctuate_text(body: Dict[str, Any] = Body(...)):
         return {"result": {"punc_text": punc_text}, "warning": str(e)}
 
     return {"result": {"punc_text": punc_text}}
+
+
+"""
+纠错配置管理相关 HTTP 接口
+"""
+
+
+@app.get("/api/correction-config")
+async def get_correction_config():
+    """获取纠错配置"""
+    config = load_correction_config()
+    return config
+
+
+@app.post("/api/correction-config")
+async def update_correction_config(config: CorrectionConfig):
+    """更新纠错配置"""
+    config_dict = config.dict()
+    config_dict['updatedAt'] = datetime.now().isoformat()
+    
+    if save_correction_config(config_dict):
+        return {
+            "success": True,
+            "message": "配置保存成功",
+            "data": config_dict
+        }
+    else:
+        raise HTTPException(status_code=500, detail="保存配置失败")
+
+
+@app.delete("/api/correction-config")
+async def delete_correction_config():
+    """删除自定义配置，恢复默认配置"""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            os.remove(CONFIG_FILE)
+        return {
+            "success": True,
+            "message": "已重置为默认配置"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除配置失败: {str(e)}")
+
+
+@app.get("/")
+async def root():
+    """根路径"""
+    return {"message": "PaddleStream API 服务运行中"}
 
 
 # 全局TTS缓冲会话管理器
