@@ -199,6 +199,31 @@ asr_client = ASROnlineClientExecutor()
 llm_streams: Dict[str, Dict[str, Any]] = {}
 
 
+def normalize_text(text: str) -> str:
+    """
+    规范化文本：移除特殊字符、处理正斜杠、规范化大数字中的逗号
+    """
+    if not text:
+        return ""
+
+    # 1. 移除英文字母以及部分特殊字符（保持与原逻辑一致）
+    pattern = re.compile(r"[a-zA-Z_\"'`<>《》【】\[\]{}@#$^&*]+")
+    text = pattern.sub("", text).strip()
+
+    # 2. 将正斜杠替换为空格
+    if "/" in text:
+        text = text.replace("/", " ")
+
+    # 3. 规范化：将形如 123,456 或 12,345,678 的大数字中的逗号去除
+    # 使用负向断言以兼容中文边界，并防止匹配不完整的数字序列
+    text = re.sub(
+        r"(?<!\d)(\d{1,3}(?:,\d{3})+)(?![,\d])",
+        lambda m: m.group(1).replace(",", ""),
+        text,
+    )
+    return text
+
+
 class TTSBufferSession:
     """TTS缓冲会话类，支持流式文本输入和实时语音合成"""
 
@@ -260,22 +285,11 @@ class TTSBufferSession:
             # 正常分句处理
             sentences = self._extract_sentences()
 
-        # 将提取的句子加入待合成队列，并移除英文字母以及部分特殊字符
+        # 将提取的句子加入待合成队列，并进行规范化处理
 
         filtered_sentences = []
-        pattern = re.compile(r"[a-zA-Z_\"'`<>《》【】\[\]{}@#$^&*]+")
         for sentence in sentences:
-            # 先移除指定字符
-            cleaned = pattern.sub("", sentence).strip()
-            # 将正斜杠替换为空格
-            if "/" in cleaned:
-                cleaned = cleaned.replace("/", " ")
-            # 规范化：将形如 123,456 或 12,345,678 的大数字中的逗号去除，不影响其它逗号
-            cleaned = re.sub(
-                r"\b(\d{1,3}(?:,\d{3})+)\b",
-                lambda m: m.group(1).replace(",", ""),
-                cleaned,
-            )
+            cleaned = normalize_text(sentence)
             if cleaned:
                 filtered_sentences.append(cleaned)
                 self.pending_sentences.put(cleaned)
@@ -333,9 +347,11 @@ class TTSBufferSession:
         sentences = []
 
         if self.text_buffer.strip():
-            sentences.append(self.text_buffer.strip())
-            self.pending_sentences.put(self.text_buffer.strip())
-            self.total_sentences += 1
+            cleaned = normalize_text(self.text_buffer)
+            if cleaned:
+                sentences.append(cleaned)
+                self.pending_sentences.put(cleaned)
+                self.total_sentences += 1
             self.text_buffer = ""
 
         return sentences
@@ -626,8 +642,11 @@ async def start_tts(sid, data):
         spk_id = data.get("spk_id", 0)
         tts_type = data.get("type", "basic")  # 基础TTS或流式TTS
 
+        # 进行文本规范化处理
+        text = normalize_text(text)
+
         if not text:
-            await sio.emit("tts_error", {"error": "Text is required"}, room=sid)
+            await sio.emit("tts_error", {"error": "Text is required after normalization"}, room=sid)
             return
 
         # 定义流式回调函数
