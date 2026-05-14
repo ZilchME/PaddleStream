@@ -985,7 +985,7 @@ async def send_llm_message(sid, data):
             sid=sid,
             llm_api_url=llm_api_url,
             input_text=input_text,
-            llm_session_id=sid,
+            llm_session_id=llm_session_id,
         )
 
     except Exception as e:
