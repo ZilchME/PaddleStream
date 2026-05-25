@@ -7,6 +7,7 @@ import time
 import http.client
 import codecs
 import os
+import logging
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -28,6 +29,19 @@ from config import (
     SOCKETIO_PATH,
     LLM_API_CONFIG,
 )
+
+# ============ 日志配置 ============
+logger = logging.getLogger("TTS")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setLevel(logging.INFO)
+formatter = logging.Formatter(
+    "%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+handler.setFormatter(formatter)
+if not logger.handlers:
+    logger.addHandler(handler)
 
 # 尝试读取标点服务配置，若不存在则使用默认值
 try:
@@ -294,6 +308,13 @@ class TTSBufferSession:
                 filtered_sentences.append(cleaned)
                 self.pending_sentences.put(cleaned)
                 self.total_sentences += 1
+                logger.info(
+                    "[Session %s] 入队待合成句子 [%d/%d]: %s",
+                    self.session_id,
+                    self.total_sentences,
+                    self.max_buffer_size,
+                    cleaned[:200],
+                )
 
         return filtered_sentences
 
@@ -352,6 +373,13 @@ class TTSBufferSession:
                 sentences.append(cleaned)
                 self.pending_sentences.put(cleaned)
                 self.total_sentences += 1
+                logger.info(
+                    "[Session %s] flush: 入队剩余文本 [%d/%d]: %s",
+                    self.session_id,
+                    self.total_sentences,
+                    self.max_buffer_size,
+                    cleaned[:200],
+                )
             self.text_buffer = ""
 
         return sentences
@@ -377,7 +405,7 @@ class TTSBufferSession:
         try:
             loop.run_until_complete(self._synthesis_loop())
         except Exception as e:
-            print(f"TTS synthesis worker error: {e}")
+            logger.error("[Session %s] TTS 合成工作线程异常: %s", self.session_id, str(e))
         finally:
             loop.close()
             self.is_processing = False
@@ -394,8 +422,12 @@ class TTSBufferSession:
                     async with self.synthesis_lock:
                         if not self.stop_synthesis:  # 再次检查，避免在等待锁期间被停止
                             self.current_synthesizing_sentence = sentence
-                            print(
-                                f"开始合成句子 {self.processed_sentences + 1}: {sentence[:100]}..."
+                            logger.info(
+                                "[Session %s] 开始合成句子 %d/%d: %s",
+                                self.session_id,
+                                self.processed_sentences + 1,
+                                self.total_sentences,
+                                sentence[:200],
                             )
 
                             # 执行TTS合成
@@ -403,15 +435,19 @@ class TTSBufferSession:
                             self.processed_sentences += 1
 
                             self.current_synthesizing_sentence = None
-                            print(
-                                f"完成合成句子 {self.processed_sentences}: {sentence[:100]}..."
+                            logger.info(
+                                "[Session %s] 完成合成句子 %d/%d: %s",
+                                self.session_id,
+                                self.processed_sentences,
+                                self.total_sentences,
+                                sentence[:200],
                             )
 
             except Empty:
                 # 队列为空，继续等待
                 continue
             except Exception as e:
-                print(f"Error in synthesis loop: {e}")
+                logger.error("[Session %s] 合成循环异常: %s", self.session_id, str(e))
                 # 发生错误时也要清除当前合成状态
                 self.current_synthesizing_sentence = None
 
@@ -440,10 +476,20 @@ class TTSBufferSession:
             )
 
             if result["status"] != "completed":
-                print(f"句子合成失败: {sentence[:50]}... - {result}")
+                logger.error(
+                    "[Session %s] 句子合成失败: %s - %s",
+                    self.session_id,
+                    sentence[:200],
+                    result,
+                )
 
         except Exception as e:
-            print(f"Error synthesizing sentence '{sentence[:50]}...': {e}")
+            logger.error(
+                "[Session %s] 句子合成异常: %s - %s",
+                self.session_id,
+                sentence[:200],
+                str(e),
+            )
 
     def stop_processing(self):
         """停止合成处理"""
@@ -649,6 +695,8 @@ async def start_tts(sid, data):
             await sio.emit("tts_error", {"error": "Text is required after normalization"}, room=sid)
             return
 
+        logger.info("[Session %s] 基础TTS: 开始合成 [%d 字符]: %s", sid, len(text), text[:500])
+
         # 定义流式回调函数
         async def stream_callback(chunk_data):
             # 添加类型信息
@@ -747,6 +795,7 @@ async def stream_text(sid, data):
 @sio.event
 async def flush_tts_buffer(sid):
     """清空TTS缓冲区，合成剩余文本，并在完成后发送信号"""
+    logger.info("[Session %s] flush_tts_buffer 被调用", sid)
     if sid not in tts_buffer_sessions:
         await sio.emit("tts_error", {"error": "Stream TTS session not found"}, room=sid)
         return
@@ -781,7 +830,7 @@ async def _wait_for_synthesis_completion(sid: str, session: TTSBufferSession):
         await asyncio.sleep(0.1)
 
     # 所有句子都已合成完毕，发送完成信号
-    print(f"所有句子合成完毕，会话: {sid}")
+    logger.info("[Session %s] 所有句子合成完毕 (共 %d 句)", sid, session.total_sentences)
     await sio.emit("stream_tts_finished", {"session_id": sid}, room=sid)
 
 

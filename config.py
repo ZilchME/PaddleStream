@@ -21,7 +21,7 @@ TTS_SERVER_CONFIG = {
 # 可选，如果不使用标点服务，可以将 default_ip 和 default_port 设置为 None
 # 或者不设置该选项
 PUNC_SERVER_CONFIG = {
-    "default_ip": "10.229.33.207",
+    "default_ip": "127.0.0.1",
     "default_port": 8190,
 }
 
@@ -33,6 +33,6 @@ SOCKETIO_PATH = "/socket.io/"
 
 # LLM API 配置
 LLM_API_CONFIG = {
-    "url": "http://10.229.33.207:48080/stream",  # 请根据实际情况修改
+    "url": "http://127.0.0.1:48080/stream",  # 请根据实际情况修改
     "timeout": 120,
 }

@@ -136,6 +136,11 @@ class WebSocketAudioHandler:
             return None
 
 
+class ASRServiceNotAvailableError(Exception):
+    """ASR 服务不可用异常"""
+    pass
+
+
 class ASRWsAudioHandler:
     def __init__(
         self,
@@ -144,6 +149,8 @@ class ASRWsAudioHandler:
         endpoint="/paddlespeech/asr/streaming",
         punc_server_ip=None,
         punc_server_port=None,
+        max_retries=2,
+        retry_delay=1.0,
     ):
         """PaddleSpeech Online ASR Server Client  audio handler
            Online asr server use the websocket protocol
@@ -153,27 +160,61 @@ class ASRWsAudioHandler:
             endpoint(str, optional): to compatiable with python server and c++ server.
             punc_server_ip(str, optional): the punctuation server ip. Defaults to None.
             punc_server_port(int, optional): the punctuation port. Defaults to None
+            max_retries (int, optional): max connection retry times. Defaults to 2.
+            retry_delay (float, optional): retry delay in seconds. Defaults to 1.0.
         """
         self.url = url
         self.port = port
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         if url is None or port is None or endpoint is None:
             self.url = None
         else:
             self.url = "ws://" + self.url + ":" + str(self.port) + endpoint
         self.punc_server = TextHttpHandler(punc_server_ip, punc_server_port)
+        self.is_server_available = False
         print(f"endpoint: {self.url}")
+
+    async def health_check(self) -> bool:
+        """Check if the ASR server is reachable by attempting a WebSocket connection.
+
+        Returns:
+            bool: True if server is available, False otherwise.
+        """
+        if self.url is None:
+            print("[ASR Health Check] URL is not configured")
+            return False
+        try:
+            async with websockets.connect(self.url, ping_interval=None, ping_timeout=10):
+                self.is_server_available = True
+                return True
+        except Exception as e:
+            self.is_server_available = False
+            print(f"[ASR Health Check] Server unavailable: {e}")
+            return False
 
     async def run_websocket_audio(
         self, audio_handler: WebSocketAudioHandler, real_time_callback=None
     ):
-        """处理来自WebSocket的音频数据流"""
+        """处理来自WebSocket的音频数据流
+        
+        包含服务健康检查和重试机制，当 ASR 服务不可用时抛出 ASRServiceNotAvailableError。
+        """
         if self.url is None:
-            print("No asr server, please input valid ip and port")
-            return ""
+            print("[ASR Fallback] No asr server configured, please input valid ip and port")
+            raise ASRServiceNotAvailableError("ASR服务未配置，请检查配置文件中的 ASR_SERVER_CONFIG")
+
+        # 预检查服务可用性
+        if not await self.health_check():
+            raise ASRServiceNotAvailableError(
+                f"ASR服务不可用 ({self.url})，请检查服务是否启动"
+            )
 
         # 建立WebSocket连接
         start_time = time.time()
-        async with websockets.connect(self.url) as ws:
+        async with websockets.connect(
+            self.url, ping_interval=None, ping_timeout=10
+        ) as ws:
             # 发送开始信号
             audio_info = json.dumps(
                 {
