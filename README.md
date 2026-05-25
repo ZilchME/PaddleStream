@@ -34,6 +34,7 @@ pip install -r requirements.txt
 ```
 
 主要依赖:
+
 - fastapi: Web 框架
 - uvicorn: ASGI 服务器
 - python-socketio: WebSocket 支持
@@ -100,15 +101,16 @@ python main.py
 详细的 LLM WebSocket 使用文档请查看: [LLM_WEBSOCKET_GUIDE.md](./LLM_WEBSOCKET_GUIDE.md)
 
 ### 使用示例
+
 ### 文本标点接口
 
 提供两种方式为文本添加标点：
 
 - HTTP 接口：
 
-    - 路径：`POST /paddlespeech/text/punctuate`
-    - 请求体：`{"text": "待添加标点的文本"}`
-    - 响应体：`{"result": {"punc_text": "带标点文本"}}`
+  - 路径：`POST /paddlespeech/text/punctuate`
+  - 请求体：`{"text": "待添加标点的文本"}`
+  - 响应体：`{"result": {"punc_text": "带标点文本"}}`
 
     示例：
 
@@ -121,10 +123,10 @@ python main.py
 
 - Socket.IO 事件：
 
-    - 发送事件：`punctuate`，数据：`{"text": "待添加标点的文本"}`
-    - 接收事件：
-        - 成功：`punctuated`，数据：`{"punc_text": str, "session_id": str}`
-        - 失败：`punctuate_error`，数据：`{"error": str}`
+  - 发送事件：`punctuate`，数据：`{"text": "待添加标点的文本"}`
+  - 接收事件：
+    - 成功：`punctuated`，数据：`{"punc_text": str, "session_id": str}`
+    - 失败：`punctuate_error`，数据：`{"error": str}`
 
 标点服务地址可在 `config.py` 中通过 `PUNC_SERVER_CONFIG = {"default_ip": "127.0.0.1", "default_port": 8090}` 配置；若缺省则使用上述默认值。
 

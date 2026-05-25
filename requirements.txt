@@ -1,9 +1,0 @@
-# PaddleStream 依赖包
-
-# Web框架
-fastapi>=0.68.0
-uvicorn[standard]>=0.15.0
-python-socketio>=5.4.0
-
-# 其他工具
-numpy
