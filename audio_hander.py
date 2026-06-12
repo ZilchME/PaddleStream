@@ -15,9 +15,19 @@ import wave
 
 from datetime import datetime
 
+try:
+    from config import SYNC_HTTP_TIMEOUT_SECONDS
+except Exception:
+    SYNC_HTTP_TIMEOUT_SECONDS = 10
+
 
 class TextHttpHandler:
-    def __init__(self, server_ip="127.0.0.1", port=8090):
+    def __init__(
+        self,
+        server_ip="127.0.0.1",
+        port=8090,
+        timeout=SYNC_HTTP_TIMEOUT_SECONDS,
+    ):
         """Text http client request
 
         Args:
@@ -27,6 +37,7 @@ class TextHttpHandler:
         super().__init__()
         self.server_ip = server_ip
         self.port = port
+        self.timeout = timeout
         if server_ip is None or port is None:
             self.url = None
         else:
@@ -50,7 +61,7 @@ class TextHttpHandler:
             "text": text,
         }
         try:
-            res = requests.post(url=self.url, data=json.dumps(request))
+            res = requests.post(url=self.url, json=request, timeout=self.timeout)
             response_dict = res.json()
             punc_text = response_dict["result"]["punc_text"]
         except Exception as e:
@@ -149,6 +160,7 @@ class ASRWsAudioHandler:
         endpoint="/paddlespeech/asr/streaming",
         punc_server_ip=None,
         punc_server_port=None,
+        punc_request_timeout=SYNC_HTTP_TIMEOUT_SECONDS,
         max_retries=2,
         retry_delay=1.0,
     ):
@@ -171,7 +183,9 @@ class ASRWsAudioHandler:
             self.url = None
         else:
             self.url = "ws://" + self.url + ":" + str(self.port) + endpoint
-        self.punc_server = TextHttpHandler(punc_server_ip, punc_server_port)
+        self.punc_server = TextHttpHandler(
+            punc_server_ip, punc_server_port, timeout=punc_request_timeout
+        )
         self.is_server_available = False
         print(f"endpoint: {self.url}")
 
@@ -300,7 +314,14 @@ class ASRWsAudioHandler:
 
 
 class TTSWsHandler:
-    def __init__(self, server="127.0.0.1", port=8092, play: bool = False):
+    def __init__(
+        self,
+        server="127.0.0.1",
+        port=8092,
+        play: bool = False,
+        sample_rate_timeout: float = SYNC_HTTP_TIMEOUT_SECONDS,
+        sample_rate_fallback: int = 24000,
+    ):
         """PaddleSpeech Online TTS Server Client  audio handler
            Online tts server use the websocket protocol
         Args:
@@ -323,7 +344,16 @@ class TTSWsHandler:
             + str(self.port)
             + "/paddlespeech/tts/streaming/samplerate"
         )
-        self.sample_rate = requests.get(self.url_get_sr).json()["sample_rate"]
+        self.sample_rate = sample_rate_fallback
+        try:
+            self.sample_rate = requests.get(
+                self.url_get_sr, timeout=sample_rate_timeout
+            ).json().get("sample_rate", sample_rate_fallback)
+        except Exception as e:
+            print(
+                f"Failed to fetch TTS sample rate from {self.url_get_sr}, "
+                f"fallback to {self.sample_rate}: {e}"
+            )
 
         if self.play:
             import pyaudio

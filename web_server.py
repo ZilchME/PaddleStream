@@ -21,13 +21,14 @@ from pydantic import BaseModel
 import socketio
 from audio_hander import WebSocketAudioHandler, TextHttpHandler
 from paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
+from session_manager import SessionManager
 from config import (
     ASR_SERVER_CONFIG,
     TTS_SERVER_CONFIG,
-    WEB_SERVER_CONFIG,
     SOCKETIO_CONFIG,
     SOCKETIO_PATH,
     LLM_API_CONFIG,
+    SYNC_HTTP_TIMEOUT_SECONDS,
 )
 
 # ============ 日志配置 ============
@@ -123,7 +124,11 @@ tts_executor = TTSWebServerExecutor(
 punc_client = TextHttpHandler(
     server_ip=PUNC_SERVER_CONFIG.get("default_ip"),
     port=PUNC_SERVER_CONFIG.get("default_port"),
+    timeout=SYNC_HTTP_TIMEOUT_SECONDS,
 )
+
+# 统一管理会话状态
+session_manager = SessionManager()
 
 
 """
@@ -204,13 +209,7 @@ async def root():
     return {"message": "PaddleStream API 服务运行中"}
 
 
-# 全局TTS缓冲会话管理器
-tts_buffer_sessions = {}
-# 全局变量，存储音频处理器和ASR客户端
-asr_sessions = {}
 asr_client = ASROnlineClientExecutor()
-# 全局LLM流式会话状态，用于支持取消（存放 stop_event 和 conn）
-llm_streams: Dict[str, Dict[str, Any]] = {}
 
 
 def normalize_text(text: str) -> str:
@@ -541,14 +540,15 @@ async def disconnect(sid):
     print(f"Client disconnected: {sid}")
 
     # 清理ASR会话
-    if sid in asr_sessions:
+    if session_manager.has_asr_session(sid):
         # 停止处理并保存音频文件
-        asr_sessions[sid].stop_processing()
-        del asr_sessions[sid]
+        asr_session = session_manager.pop_asr_session(sid)
+        if asr_session:
+            asr_session.stop_processing()
 
     # 清理TTS会话 - 允许当前合成完成
-    if sid in tts_buffer_sessions:
-        buffer_session = tts_buffer_sessions[sid]
+    buffer_session = session_manager.get_tts_buffer_session(sid)
+    if buffer_session:
         if buffer_session.is_processing:
             print(f"等待TTS会话 {sid} 的剩余合成完成...")
             # 停止接受新文本，但等待当前合成完成
@@ -558,7 +558,7 @@ async def disconnect(sid):
         else:
             # 没有正在进行的合成，直接清理
             buffer_session.stop_processing()
-            del tts_buffer_sessions[sid]
+            session_manager.pop_tts_buffer_session(sid)
 
     # 清理普通TTS会话
     tts_executor.remove_session(sid)
@@ -574,10 +574,10 @@ async def start_asr(sid):
     """开始ASR处理"""
     print(f"Starting ASR for session: {sid}")
     asr_session = WebSocketAudioHandler(sample_rate=16000, chunk_size=1024)
-    asr_sessions[sid] = asr_session
+    session_manager.set_asr_session(sid, asr_session)
 
     asr_session.start_processing()
-    asyncio.create_task(process_asr_async(sid, asr_sessions[sid]))
+    asyncio.create_task(process_asr_async(sid, asr_session))
     print(f"Started recording for client {sid}")
 
     await sio.emit("asr_started", {"session_id": sid}, room=sid)
@@ -612,6 +612,7 @@ async def process_asr_async(sid, audio_handler):
                 port=ASR_SERVER_CONFIG["default_port"],
                 punc_server_ip=PUNC_SERVER_CONFIG.get("default_ip"),
                 punc_server_port=PUNC_SERVER_CONFIG.get("default_port"),
+                request_timeout=SYNC_HTTP_TIMEOUT_SECONDS,
                 real_time_callback=real_time_callback,
             ),
         )
@@ -638,7 +639,8 @@ async def process_asr_async(sid, audio_handler):
 @sio.event
 async def audio_data(sid, data):
     """处理音频数据"""
-    if sid not in asr_sessions:
+    asr_session = session_manager.get_asr_session(sid)
+    if not asr_session:
         await sio.emit("error", {"message": "ASR session not found"}, room=sid)
         return
 
@@ -648,10 +650,10 @@ async def audio_data(sid, data):
             # 解码base64音频数据
             audio_bytes = base64.b64decode(data["audio"])
             # 添加到音频处理器
-            asr_sessions[sid].add_audio_data(audio_bytes)
+            asr_session.add_audio_data(audio_bytes)
         elif isinstance(data, bytes):
             # 直接是字节数据
-            asr_sessions[sid].add_audio_data(data)
+            asr_session.add_audio_data(data)
         else:
             print(f"Unexpected audio data format from {sid}: {type(data)}")
 
@@ -665,8 +667,8 @@ async def audio_data(sid, data):
 @sio.event
 async def stop_asr(sid):
     """停止ASR处理"""
-    if sid in asr_sessions:
-        asr_session = asr_sessions[sid]
+    asr_session = session_manager.pop_asr_session(sid)
+    if asr_session:
         asr_session.stop_processing()
         await sio.emit("asr_stopped", {"session_id": sid}, room=sid)
     else:
@@ -730,9 +732,9 @@ async def start_stream_tts(sid, data):
         max_buffer_size = data.get("max_buffer_size", 1000)
 
         # 如果已存在会话，先停止
-        if sid in tts_buffer_sessions:
-            tts_buffer_sessions[sid].stop_processing()
-            del tts_buffer_sessions[sid]
+        existing_session = session_manager.pop_tts_buffer_session(sid)
+        if existing_session:
+            existing_session.stop_processing()
 
         # 创建新的TTS缓冲会话
         buffer_session = TTSBufferSession(
@@ -746,7 +748,7 @@ async def start_stream_tts(sid, data):
             await sio.emit("tts_stream_audio", chunk_data, room=sid)
 
         buffer_session.set_stream_callback(stream_callback)
-        tts_buffer_sessions[sid] = buffer_session
+        session_manager.set_tts_buffer_session(sid, buffer_session)
 
         # 开始后台合成处理
         buffer_session.start_synthesis()
@@ -765,7 +767,8 @@ async def start_stream_tts(sid, data):
 @sio.event
 async def stream_text(sid, data):
     """接收流式文本数据"""
-    if sid not in tts_buffer_sessions:
+    buffer_session = session_manager.get_tts_buffer_session(sid)
+    if not buffer_session:
         await sio.emit("tts_error", {"error": "Stream TTS session not found"}, room=sid)
         return
 
@@ -776,7 +779,6 @@ async def stream_text(sid, data):
             return
 
         # 添加文本到缓冲区
-        buffer_session = tts_buffer_sessions[sid]
         sentences = buffer_session.add_text(text)
 
         # 发送状态更新
@@ -796,12 +798,12 @@ async def stream_text(sid, data):
 async def flush_tts_buffer(sid):
     """清空TTS缓冲区，合成剩余文本，并在完成后发送信号"""
     logger.info("[Session %s] flush_tts_buffer 被调用", sid)
-    if sid not in tts_buffer_sessions:
+    buffer_session = session_manager.get_tts_buffer_session(sid)
+    if not buffer_session:
         await sio.emit("tts_error", {"error": "Stream TTS session not found"}, room=sid)
         return
 
     try:
-        buffer_session = tts_buffer_sessions[sid]
         remaining_sentences = buffer_session.flush_buffer()
 
         # 发送缓冲区清空状态
@@ -835,15 +837,14 @@ async def _wait_for_synthesis_completion(sid: str, session: TTSBufferSession):
 
 
 async def _graceful_tts_session_cleanup(sid: str):
-    """优雅地清理TTS会话 - 等待当前合成完成"""
-    if sid not in tts_buffer_sessions:
+    """清理TTS会话 - 等待当前合成完成"""
+    buffer_session = session_manager.get_tts_buffer_session(sid)
+    if not buffer_session:
         return
-
-    buffer_session = tts_buffer_sessions[sid]
     max_wait_time = 30  # 最多等待30秒
     wait_time = 0
 
-    print(f"开始优雅清理TTS会话 {sid}...")
+    print(f"开始清理TTS会话 {sid}...")
 
     # 等待当前正在合成的句子完成
     while (
@@ -865,22 +866,23 @@ async def _graceful_tts_session_cleanup(sid: str):
             wait_time += 0.5
 
     # 清理会话
-    if sid in tts_buffer_sessions:
+    if session_manager.has_tts_buffer_session(sid):
         if wait_time >= max_wait_time:
             print(f"TTS会话 {sid} 清理超时，强制停止")
         else:
             print(f"TTS会话 {sid} 清理完成，用时 {wait_time:.1f}s")
 
-        tts_buffer_sessions[sid].stop_processing()
-        del tts_buffer_sessions[sid]
+        existing_session = session_manager.pop_tts_buffer_session(sid)
+        if existing_session:
+            existing_session.stop_processing()
 
 
 async def _wait_and_stop_tts_session(sid: str):
     """等待TTS会话完成合成后停止"""
-    if sid not in tts_buffer_sessions:
+    buffer_session = session_manager.get_tts_buffer_session(sid)
+    if not buffer_session:
         return
 
-    buffer_session = tts_buffer_sessions[sid]
     max_wait_time = 60  # 最多等待60秒
     wait_time = 0
 
@@ -906,7 +908,7 @@ async def _wait_and_stop_tts_session(sid: str):
             )
 
     # 停止会话
-    if sid in tts_buffer_sessions:
+    if session_manager.has_tts_buffer_session(sid):
         if wait_time >= max_wait_time:
             print(f"TTS会话 {sid} 等待超时，强制停止")
             await sio.emit(
@@ -918,7 +920,7 @@ async def _wait_and_stop_tts_session(sid: str):
             print(f"TTS会话 {sid} 正常完成，用时 {wait_time:.1f}s")
 
         buffer_session.stop_processing()
-        del tts_buffer_sessions[sid]
+        session_manager.pop_tts_buffer_session(sid)
         await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
 
 
@@ -926,8 +928,9 @@ async def _wait_and_stop_tts_session(sid: str):
 async def get_tts_status(sid):
     """获取TTS会话状态"""
     try:
-        if sid in tts_buffer_sessions:
-            status = tts_buffer_sessions[sid].get_status()
+        buffer_session = session_manager.get_tts_buffer_session(sid)
+        if buffer_session:
+            status = buffer_session.get_status()
             await sio.emit("tts_status", status, room=sid)
         else:
             await sio.emit("tts_status", {"session_id": sid, "exists": False}, room=sid)
@@ -946,8 +949,8 @@ async def stop_tts(sid):
     tts_executor.remove_session(sid)
 
     # 停止流式TTS缓冲会话 - 支持graceful shutdown
-    if sid in tts_buffer_sessions:
-        buffer_session = tts_buffer_sessions[sid]
+    buffer_session = session_manager.get_tts_buffer_session(sid)
+    if buffer_session:
 
         # 停止接受新文本
         buffer_session.stop_accepting_new_text = True
@@ -973,7 +976,7 @@ async def stop_tts(sid):
         else:
             # 没有进行中的合成，直接停止
             buffer_session.stop_processing()
-            del tts_buffer_sessions[sid]
+            session_manager.pop_tts_buffer_session(sid)
             await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
     else:
         await sio.emit("tts_stopped", {"session_id": sid}, room=sid)
@@ -1035,6 +1038,7 @@ async def send_llm_message(sid, data):
             llm_api_url=llm_api_url,
             input_text=input_text,
             llm_session_id=llm_session_id,
+            timeout=int(LLM_API_CONFIG.get("timeout", 600)) if isinstance(LLM_API_CONFIG, dict) else 600,
         )
 
     except Exception as e:
@@ -1043,7 +1047,11 @@ async def send_llm_message(sid, data):
 
 
 async def _process_llm_sse_stream(
-    sid: str, llm_api_url: str, input_text: str, llm_session_id: str
+    sid: str,
+    llm_api_url: str,
+    input_text: str,
+    llm_session_id: str,
+    timeout: int = 600,
 ):
     """
     处理LLM的SSE流式响应,模拟前端的处理逻辑
@@ -1069,8 +1077,8 @@ async def _process_llm_sse_stream(
         loop = asyncio.get_running_loop()
 
         # 如果已有同名会话在运行，先请求取消并关闭已有连接
-        if llm_session_id in llm_streams:
-            prev = llm_streams.get(llm_session_id)
+        if session_manager.has_llm_stream(llm_session_id):
+            prev = session_manager.get_llm_stream(llm_session_id)
             try:
                 if prev and prev.get("stop_event"):
                     prev["stop_event"].set()
@@ -1083,7 +1091,7 @@ async def _process_llm_sse_stream(
                 pass
 
         stop_event = threading.Event()
-        llm_streams[llm_session_id] = {"stop_event": stop_event, "conn": None}
+        session_manager.set_llm_stream(llm_session_id, {"stop_event": stop_event, "conn": None})
 
         def on_content(content: str):
             # 在线程中回调，将消息安全地投递到事件循环中
@@ -1107,6 +1115,7 @@ async def _process_llm_sse_stream(
                     request_json=request_data,
                     on_content=on_content,
                     session_id=llm_session_id,
+                    timeout=timeout,
                 )
             except Exception as e:
                 # 将错误发送到前端
@@ -1131,8 +1140,7 @@ async def _process_llm_sse_stream(
 
         # 清理会话状态
         try:
-            if llm_session_id in llm_streams:
-                del llm_streams[llm_session_id]
+            session_manager.pop_llm_stream(llm_session_id)
         except Exception:
             pass
 
@@ -1178,7 +1186,7 @@ def _blocking_sse_post_and_parse(
     # 如果提供了 session_id，将 conn 注册到全局状态，方便外部关闭
     try:
         if session_id:
-            llm_entry = llm_streams.get(session_id)
+            llm_entry = session_manager.get_llm_stream(session_id)
             if llm_entry is not None:
                 llm_entry["conn"] = conn
     except Exception:
@@ -1210,7 +1218,7 @@ def _blocking_sse_post_and_parse(
         while True:
             # 在每次读取前检查是否被请求停止
             if session_id:
-                entry = llm_streams.get(session_id)
+                entry = session_manager.get_llm_stream(session_id)
                 if entry and entry.get("stop_event") and entry["stop_event"].is_set():
                     # 外部请求停止，关闭连接并退出
                     try:
@@ -1257,8 +1265,8 @@ def _blocking_sse_post_and_parse(
 
         # 清理会话中的 conn 引用（如果有）
         try:
-            if session_id and session_id in llm_streams:
-                llm_streams[session_id]["conn"] = None
+            if session_id and session_manager.has_llm_stream(session_id):
+                session_manager.update_llm_stream(session_id, conn=None)
         except Exception:
             pass
 
@@ -1288,7 +1296,7 @@ def _process_sse_block_sync(block: str, on_content: "Callable[[str], None]"):
 
 
 @sio.event
-async def cancel_llm_stream(sid):
+async def cancel_llm_stream(sid, data=None):
     """取消正在进行的LLM SSE流（按 session_id）。
 
     接收 JSON: {"session_id": "..."}，若未提供则使用 socket sid 作为 session_id。
@@ -1296,9 +1304,9 @@ async def cancel_llm_stream(sid):
     """
     try:
         print(f"取消LLM流请求: {sid}")
-        session_id = sid
+        session_id = (data or {}).get("session_id") or sid
 
-        entry = llm_streams.get(session_id)
+        entry = session_manager.get_llm_stream(session_id)
         if not entry:
             await sio.emit(
                 "llm_stream_not_found",
@@ -1324,8 +1332,7 @@ async def cancel_llm_stream(sid):
 
         # 删除全局记录
         try:
-            if session_id in llm_streams:
-                del llm_streams[session_id]
+            session_manager.pop_llm_stream(session_id)
         except Exception:
             pass
 

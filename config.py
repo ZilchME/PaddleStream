@@ -1,7 +1,10 @@
 # StreamASR 配置文件
 
 # Web服务器配置
-WEB_SERVER_CONFIG = {"host": "0.0.0.0", "port": 8000}
+WEB_SERVER_CONFIG = {"host": "0.0.0.0", "port": 8008}
+
+# 同步外部 HTTP 请求超时
+SYNC_HTTP_TIMEOUT_SECONDS = 10
 
 # ASR服务器配置
 ASR_SERVER_CONFIG = {

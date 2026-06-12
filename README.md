@@ -30,7 +30,7 @@ paddlespeech_server start --config_file conf/punc_application.yaml
 ### 安装依赖
 
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
 主要依赖:
@@ -69,6 +69,7 @@ python main.py
 ```
 
 服务将在 `http://0.0.0.0:8008` 启动。
+服务端口由 `config.py` 中的 `WEB_SERVER_CONFIG` 统一控制。
 
 ### 事件接口
 
@@ -97,8 +98,6 @@ python main.py
 - `llm_stream_complete`: LLM流式响应完成
 - `llm_error`: LLM处理错误
 - `cancel_llm_stream`: 取消LLM流式传输
-
-详细的 LLM WebSocket 使用文档请查看: [LLM_WEBSOCKET_GUIDE.md](./LLM_WEBSOCKET_GUIDE.md)
 
 ### 使用示例
 
@@ -175,8 +174,6 @@ socket.on('llm_stream_complete', () => {
 });
 ```
 
-更多示例请查看 `llm_websocket_example.html`。
-
 ### 文件说明
 
 - `main.py`: 主入口文件
@@ -184,8 +181,6 @@ socket.on('llm_stream_complete', () => {
 - `config.py`: 配置文件
 - `audio_hander.py`: 音频处理器
 - `paddlespeech_client.py`: PaddleSpeech 客户端
-- `llm_websocket_example.html`: LLM WebSocket 前端示例
-- `LLM_WEBSOCKET_GUIDE.md`: LLM WebSocket 详细使用指南
 
 ### 架构说明
 

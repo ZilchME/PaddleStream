@@ -17,6 +17,7 @@ class ASROnlineClientExecutor:
         port: int = 8091,
         punc_server_ip: str = None,
         punc_server_port: str = None,
+        request_timeout: float = 10.0,
         real_time_callback=None,
     ):
         """处理来自WebSocket的音频数据
@@ -38,6 +39,7 @@ class ASROnlineClientExecutor:
             endpoint="/paddlespeech/asr/streaming",
             punc_server_ip=punc_server_ip,
             punc_server_port=punc_server_port,
+            punc_request_timeout=request_timeout,
         )
 
         # 创建新的事件循环
