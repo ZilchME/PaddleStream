@@ -6,7 +6,6 @@ import json
 import time
 import http.client
 import codecs
-import logging
 from urllib.parse import urlparse
 from datetime import datetime
 
@@ -20,6 +19,7 @@ from pydantic import BaseModel
 import socketio
 from .audio_handler import WebSocketAudioHandler, TextHttpHandler
 from .paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
+from .logging_utils import get_logger
 from .session_manager import SessionManager
 from .config import (
     ASR_SERVER_CONFIG,
@@ -32,18 +32,7 @@ from .config import (
     PUNC_SERVER_CONFIG,
 )
 
-# ============ 日志配置 ============
-logger = logging.getLogger("TTS")
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler()
-handler.setLevel(logging.INFO)
-formatter = logging.Formatter(
-    "%(asctime)s [%(name)s] %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-handler.setFormatter(formatter)
-if not logger.handlers:
-    logger.addHandler(handler)
+logger = get_logger("paddlestream.web")
 
 # 纠错配置文件路径
 CONFIG_FILE = CORRECTION_CONFIG_PATH
@@ -72,7 +61,7 @@ def load_correction_config() -> dict:
         try:
             return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception as e:
-            print(f"读取纠错配置文件失败: {e}")
+            logger.error("读取纠错配置文件失败: %s", e)
             return DEFAULT_CORRECTION_CONFIG
     return DEFAULT_CORRECTION_CONFIG
 
@@ -86,7 +75,7 @@ def save_correction_config(config: dict) -> bool:
         )
         return True
     except Exception as e:
-        print(f"保存纠错配置文件失败: {e}")
+        logger.error("保存纠错配置文件失败: %s", e)
         return False
 
 # 创建 FastAPI 应用
@@ -283,7 +272,7 @@ class TTSBufferSession:
         """
         # 如果已停止接受新文本，直接返回空列表
         if self.stop_accepting_new_text:
-            print(f"会话 {self.session_id} 已停止接受新文本")
+            logger.info("会话 %s 已停止接受新文本", self.session_id)
             return []
 
         self.text_buffer += text
@@ -529,13 +518,13 @@ class TTSBufferSession:
 @sio.event
 async def connect(sid, environ):
     """客户端连接"""
-    print(f"Client connected: {sid}")
+    logger.info("Client connected: %s", sid)
 
 
 @sio.event
 async def disconnect(sid):
     """客户端断开连接"""
-    print(f"Client disconnected: {sid}")
+    logger.info("Client disconnected: %s", sid)
 
     # 清理ASR会话
     if session_manager.has_asr_session(sid):
@@ -548,7 +537,7 @@ async def disconnect(sid):
     buffer_session = session_manager.get_tts_buffer_session(sid)
     if buffer_session:
         if buffer_session.is_processing:
-            print(f"等待TTS会话 {sid} 的剩余合成完成...")
+            logger.info("等待TTS会话 %s 的剩余合成完成...", sid)
             # 停止接受新文本，但等待当前合成完成
             buffer_session.stop_accepting_new_text = True
             # 创建异步任务等待完成，避免阻塞disconnect
@@ -570,13 +559,13 @@ ASR 相关事件处理
 @sio.event
 async def start_asr(sid):
     """开始ASR处理"""
-    print(f"Starting ASR for session: {sid}")
+    logger.info("Starting ASR for session: %s", sid)
     asr_session = WebSocketAudioHandler(sample_rate=16000, chunk_size=1024)
     session_manager.set_asr_session(sid, asr_session)
 
     asr_session.start_processing()
     asyncio.create_task(process_asr_async(sid, asr_session))
-    print(f"Started recording for client {sid}")
+    logger.info("Started recording for client %s", sid)
 
     await sio.emit("asr_started", {"session_id": sid}, room=sid)
 
@@ -626,10 +615,10 @@ async def process_asr_async(sid, audio_handler):
             },
             room=sid,
         )
-        print(f"Final result for {sid}: {result}")
+        logger.info("Final result for %s: %s", sid, result)
 
     except Exception as e:
-        print(f"ASR processing error: {e}")
+        logger.error("ASR processing error: %s", e)
         await sio.emit(
             "error", {"message": f"ASR processing error: {str(e)}"}, room=sid
         )
@@ -654,10 +643,10 @@ async def audio_data(sid, data):
             # 直接是字节数据
             asr_session.add_audio_data(data)
         else:
-            print(f"Unexpected audio data format from {sid}: {type(data)}")
+            logger.warning("Unexpected audio data format from %s: %s", sid, type(data))
 
     except Exception as e:
-        print(f"Error processing audio data: {e}")
+        logger.error("Error processing audio data: %s", e)
         await sio.emit(
             "error", {"message": f"Audio processing error: {str(e)}"}, room=sid
         )
@@ -682,7 +671,7 @@ TTS 相关事件处理
 @sio.event
 async def start_tts(sid, data):
     """开始TTS合成"""
-    print(f"Starting TTS for session: {sid}")
+    logger.info("Starting TTS for session: %s", sid)
 
     try:
         text = data.get("text", "")
@@ -717,14 +706,14 @@ async def start_tts(sid, data):
             await sio.emit("tts_error", result, room=sid)
 
     except Exception as e:
-        print(f"TTS error: {e}")
+        logger.error("TTS error: %s", e)
         await sio.emit("tts_error", {"error": str(e)}, room=sid)
 
 
 @sio.event
 async def start_stream_tts(sid, data):
     """开始流式TTS合成（支持缓冲）"""
-    print(f"Starting streaming TTS for session: {sid}")
+    logger.info("Starting streaming TTS for session: %s", sid)
 
     try:
         spk_id = data.get("spk_id", 0)
@@ -759,7 +748,7 @@ async def start_stream_tts(sid, data):
         )
 
     except Exception as e:
-        print(f"Stream TTS start error: {e}")
+        logger.error("Stream TTS start error: %s", e)
         await sio.emit("tts_error", {"error": str(e)}, room=sid)
 
 
@@ -789,7 +778,7 @@ async def stream_text(sid, data):
         )
 
     except Exception as e:
-        print(f"Stream text error: {e}")
+        logger.error("Stream text error: %s", e)
         await sio.emit("tts_error", {"error": str(e)}, room=sid)
 
 
@@ -821,7 +810,7 @@ async def flush_tts_buffer(sid):
         asyncio.create_task(_wait_for_synthesis_completion(sid, buffer_session))
 
     except Exception as e:
-        print(f"Flush TTS buffer error: {e}")
+        logger.error("Flush TTS buffer error: %s", e)
         await sio.emit("tts_error", {"error": str(e)}, room=sid)
 
 
@@ -843,7 +832,7 @@ async def _graceful_tts_session_cleanup(sid: str):
     max_wait_time = 30  # 最多等待30秒
     wait_time = 0
 
-    print(f"开始清理TTS会话 {sid}...")
+    logger.info("开始清理TTS会话 %s...", sid)
 
     # 等待当前正在合成的句子完成
     while (
@@ -855,8 +844,10 @@ async def _graceful_tts_session_cleanup(sid: str):
 
     # 检查是否还有未处理的句子
     if not buffer_session.pending_sentences.empty():
-        print(
-            f"会话 {sid} 还有 {buffer_session.pending_sentences.qsize()} 个待合成句子，继续等待..."
+        logger.info(
+            "会话 %s 还有 %d 个待合成句子，继续等待...",
+            sid,
+            buffer_session.pending_sentences.qsize(),
         )
 
         # 等待所有句子完成
@@ -867,9 +858,9 @@ async def _graceful_tts_session_cleanup(sid: str):
     # 清理会话
     if session_manager.has_tts_buffer_session(sid):
         if wait_time >= max_wait_time:
-            print(f"TTS会话 {sid} 清理超时，强制停止")
+            logger.warning("TTS会话 %s 清理超时，强制停止", sid)
         else:
-            print(f"TTS会话 {sid} 清理完成，用时 {wait_time:.1f}s")
+            logger.info("TTS会话 %s 清理完成，用时 %.1fs", sid, wait_time)
 
         existing_session = session_manager.pop_tts_buffer_session(sid)
         if existing_session:
@@ -885,7 +876,7 @@ async def _wait_and_stop_tts_session(sid: str):
     max_wait_time = 60  # 最多等待60秒
     wait_time = 0
 
-    print(f"等待TTS会话 {sid} 完成合成...")
+    logger.info("等待TTS会话 %s 完成合成...", sid)
 
     # 等待所有句子合成完毕
     while not buffer_session.is_finished() and wait_time < max_wait_time:
@@ -909,14 +900,14 @@ async def _wait_and_stop_tts_session(sid: str):
     # 停止会话
     if session_manager.has_tts_buffer_session(sid):
         if wait_time >= max_wait_time:
-            print(f"TTS会话 {sid} 等待超时，强制停止")
+            logger.warning("TTS会话 %s 等待超时，强制停止", sid)
             await sio.emit(
                 "tts_force_stopped",
                 {"session_id": sid, "message": "等待超时，强制停止"},
                 room=sid,
             )
         else:
-            print(f"TTS会话 {sid} 正常完成，用时 {wait_time:.1f}s")
+            logger.info("TTS会话 %s 正常完成，用时 %.1fs", sid, wait_time)
 
         buffer_session.stop_processing()
         session_manager.pop_tts_buffer_session(sid)
@@ -935,14 +926,14 @@ async def get_tts_status(sid):
             await sio.emit("tts_status", {"session_id": sid, "exists": False}, room=sid)
 
     except Exception as e:
-        print(f"Get TTS status error: {e}")
+        logger.error("Get TTS status error: %s", e)
         await sio.emit("tts_error", {"error": str(e)}, room=sid)
 
 
 @sio.event
 async def stop_tts(sid):
     """停止TTS合成"""
-    print(f"Stopping TTS for session: {sid}")
+    logger.info("Stopping TTS for session: %s", sid)
 
     # 停止普通TTS会话
     tts_executor.remove_session(sid)
@@ -998,7 +989,7 @@ async def send_llm_message(sid, data):
             - session_id: LLM会话ID (可选)
             - llm_api_url: LLM API地址 (可选,默认使用配置文件中的地址)
     """
-    print(f"收到LLM消息请求: {sid}")
+    logger.info("收到LLM消息请求: %s", sid)
 
     try:
         input_text = data.get("input_text", "")
@@ -1058,7 +1049,7 @@ async def send_llm_message(sid, data):
         )
 
     except Exception as e:
-        print(f"LLM消息处理错误: {e}")
+        logger.error("LLM消息处理错误: %s", e)
         await sio.emit("llm_error", {"error": str(e)}, room=sid)
 
 
@@ -1154,7 +1145,7 @@ async def _process_llm_sse_stream(
 
         # 发送流式传输完成信号
         await sio.emit("llm_stream_complete", {"session_id": llm_session_id}, room=sid)
-        print(f"LLM流式响应处理完成: {sid}")
+        logger.info("LLM流式响应处理完成: %s", sid)
 
         # 清理会话状态
         try:
@@ -1163,7 +1154,7 @@ async def _process_llm_sse_stream(
             pass
 
     except Exception as e:
-        print(f"LLM SSE流处理错误: {e}")
+        logger.error("LLM SSE流处理错误: %s", e)
         await sio.emit(
             "llm_error", {"error": str(e), "session_id": llm_session_id}, room=sid
         )
@@ -1295,7 +1286,6 @@ def _blocking_sse_post_and_parse(
 def _process_sse_block_sync(block: str, on_content: "Callable[[str], None]"):
     """同步处理单个SSE事件块，提取 data: 行中的JSON并回调 content。"""
     lines = block.splitlines()
-    # print(f"处理SSE块: {block}...")
     for line in lines:
         line = line.strip()
         if not line or not line.startswith("data:"):
@@ -1312,7 +1302,6 @@ def _process_sse_block_sync(block: str, on_content: "Callable[[str], None]"):
             continue
         content = data.get("content")
         if content:
-            # print(f"解析到内容: {content[:50]}...")
             on_content(content)
 
 
@@ -1324,7 +1313,7 @@ async def cancel_llm_stream(sid, data=None):
     此接口会设置停止事件并关闭 HTTP 连接，触发后台线程退出。
     """
     try:
-        print(f"取消LLM流请求: {sid}")
+        logger.info("取消LLM流请求: %s", sid)
         session_id = (data or {}).get("session_id") or sid
 
         entry = session_manager.get_llm_stream(session_id)
@@ -1349,7 +1338,7 @@ async def cancel_llm_stream(sid, data=None):
                 except Exception:
                     pass
         except Exception as e:
-            print(f"Error while cancelling LLM stream {session_id}: {e}")
+            logger.error("Error while cancelling LLM stream %s: %s", session_id, e)
 
         # 删除全局记录
         try:
@@ -1364,5 +1353,5 @@ async def cancel_llm_stream(sid, data=None):
         )
 
     except Exception as e:
-        print(f"cancel_llm_stream error: {e}")
+        logger.error("cancel_llm_stream error: %s", e)
         await sio.emit("llm_error", {"error": str(e)}, room=sid)

@@ -4,6 +4,9 @@ import time
 from typing import Callable, Optional
 
 from .audio_handler import ASRWsAudioHandler, WebSocketAudioHandler, TTSWsHandler
+from .logging_utils import get_logger
+
+logger = get_logger("paddlestream.client")
 
 
 class ASROnlineClientExecutor:
@@ -33,7 +36,7 @@ class ASROnlineClientExecutor:
         Returns:
             str: the audio text
         """
-        print("asr websocket client start for web audio")
+        logger.info("asr websocket client start for web audio")
         if server_ip is None or port is None:
             raise ValueError("ASR 服务未配置，请设置 PADDLESTREAM_ASR_SERVER_IP 和 PADDLESTREAM_ASR_SERVER_PORT")
         if endpoint is None:
@@ -61,7 +64,7 @@ class ASROnlineClientExecutor:
                 audio_handler, real_time_callback=real_time_callback
             )
         )
-        print("asr websocket client finished for web audio")
+        logger.info("asr websocket client finished for web audio")
 
         return res["result"]
 
@@ -82,8 +85,7 @@ class TTSOnlineClientExecutor:
         """
         Python API to call an executor.
         """
-        
-        print("tts websocket client start")
+        logger.info("tts websocket client start")
         if server_ip is None or port is None:
             raise ValueError("TTS 服务未配置，请设置 PADDLESTREAM_TTS_SERVER_IP 和 PADDLESTREAM_TTS_SERVER_PORT")
         if endpoint is None:
@@ -100,23 +102,29 @@ class TTSOnlineClientExecutor:
         ) = loop.run_until_complete(handler.run(input, spk_id, output))
         delay_time_list = compute_delay(receive_time_list, chunk_duration_list)
 
-        print(f"sentence: {input}")
-        print(f"duration: {duration} s")
-        print(f"first response: {first_response} s")
-        print(f"final response: {final_response} s")
-        print(f"RTF: {final_response/duration}")
+        logger.info("sentence: %s", input)
+        logger.info("duration: %s s", duration)
+        logger.info("first response: %s s", first_response)
+        logger.info("final response: %s s", final_response)
+        logger.info("RTF: %s", final_response / duration if duration else None)
         if output is not None:
             if save_audio_success:
-                print(f"Audio successfully saved in {output}")
+                logger.info("Audio successfully saved in %s", output)
             else:
-                print("Audio save failed.")
+                logger.warning("Audio save failed.")
 
         if delay_time_list != []:
-            print(
-                f"Delay situation: total number of packages: {len(receive_time_list)}, the number of delayed packets: {len(delay_time_list)}, minimum delay time: {min(delay_time_list)} s, maximum delay time: {max(delay_time_list)} s, average delay time: {sum(delay_time_list)/len(delay_time_list)} s, delay rate:{len(delay_time_list)/len(receive_time_list)}"
+            logger.info(
+                "Delay situation: total number of packages: %d, the number of delayed packets: %d, minimum delay time: %s s, maximum delay time: %s s, average delay time: %s s, delay rate:%s",
+                len(receive_time_list),
+                len(delay_time_list),
+                min(delay_time_list),
+                max(delay_time_list),
+                sum(delay_time_list) / len(delay_time_list),
+                len(delay_time_list) / len(receive_time_list),
             )
         else:
-            print("The sentence has no delay in streaming synthesis.")
+            logger.info("The sentence has no delay in streaming synthesis.")
 
 
 def compute_delay(receive_time_list, chunk_duration_list):
@@ -180,7 +188,7 @@ class WebTTSSession:
             result = await self._run_streaming_tts(text, spk_id)
             return result
         except Exception as e:
-            print(f"TTS synthesis error: {e}")
+            logger.error("TTS synthesis error: %s", e)
             return {"status": "error", "message": str(e)}
         finally:
             self.is_processing = False
@@ -194,97 +202,100 @@ class WebTTSSession:
 
         url = f"ws://{self.server_ip}:{self.port}{self.endpoint}"
 
-        async with websockets.connect(url) as ws:
-            # 发送开始请求
-            start_request = json.dumps({"task": "tts", "signal": "start"})
-            await ws.send(start_request)
-            msg = await ws.recv()
-            print(f"TTS server response: {msg}")
-            msg = json.loads(msg)
-            session = msg["session"]
+        try:
+            async with websockets.connect(url) as ws:
+                # 发送开始请求
+                start_request = json.dumps({"task": "tts", "signal": "start"})
+                await ws.send(start_request)
+                msg = await ws.recv()
+                logger.debug("TTS server response: %s", msg)
+                msg = json.loads(msg)
+                session = msg["session"]
 
-            # 发送合成请求
-            params = {
-                "text": text,
-                "spk_id": spk_id,
-            }
-            request = json.dumps(params)
-            start_time = time.time()
-            await ws.send(request)
+                # 发送合成请求
+                params = {
+                    "text": text,
+                    "spk_id": spk_id,
+                }
+                request = json.dumps(params)
+                start_time = time.time()
+                await ws.send(request)
 
-            # 处理流式响应
-            total_chunks = 0
-            first_chunk_time = None
+                # 处理流式响应
+                total_chunks = 0
+                first_chunk_time = None
 
-            while True:
-                try:
-                    message = await ws.recv()
-                    message = json.loads(message)
-                    status = message["status"]
+                while True:
+                    try:
+                        message = await ws.recv()
+                        message = json.loads(message)
+                        status = message["status"]
 
-                    if status == -1:  # 错误
-                        # 发送结束请求
-                        end_request = json.dumps(
-                            {"task": "tts", "signal": "end", "session": session}
-                        )
-                        await ws.send(end_request)
-                        return {"status": "error", "message": "TTS synthesis failed"}
-
-                    elif status == 2:  # 最后一包，合成完成
-                        end_time = time.time()
-                        total_time = end_time - start_time
-
-                        # 先发送完成信号到客户端，确保客户端接收到所有音频数据
-                        if self.stream_callback:
-                            await self.stream_callback(
-                                {
-                                    "type": "synthesis_complete",
-                                    "session_id": self.session_id,
-                                    "total_time": total_time,
-                                    "total_chunks": total_chunks,
-                                    "first_chunk_time": first_chunk_time,
-                                }
+                        if status == -1:  # 错误
+                            # 发送结束请求
+                            end_request = json.dumps(
+                                {"task": "tts", "signal": "end", "session": session}
                             )
+                            await ws.send(end_request)
+                            return {"status": "error", "message": "TTS synthesis failed"}
 
-                        # 给客户端一些时间处理完成信号
-                        await asyncio.sleep(0.1)
+                        elif status == 2:  # 最后一包，合成完成
+                            end_time = time.time()
+                            total_time = end_time - start_time
 
-                        # 然后发送结束请求到TTS服务器
-                        end_request = json.dumps(
-                            {"task": "tts", "signal": "end", "session": session}
-                        )
-                        await ws.send(end_request)
+                            # 先发送完成信号到客户端，确保客户端接收到所有音频数据
+                            if self.stream_callback:
+                                await self.stream_callback(
+                                    {
+                                        "type": "synthesis_complete",
+                                        "session_id": self.session_id,
+                                        "total_time": total_time,
+                                        "total_chunks": total_chunks,
+                                        "first_chunk_time": first_chunk_time,
+                                    }
+                                )
 
-                        return {
-                            "status": "completed",
-                            "total_time": total_time,
-                            "total_chunks": total_chunks,
-                            "first_chunk_time": first_chunk_time,
-                        }
+                            # 给客户端一些时间处理完成信号
+                            await asyncio.sleep(0.1)
 
-                    elif status == 1:  # 音频数据
-                        if first_chunk_time is None:
-                            first_chunk_time = time.time() - start_time
-
-                        audio_data = message["audio"]
-                        total_chunks += 1
-
-                        # 通过回调函数发送音频数据到客户端
-                        if self.stream_callback:
-                            await self.stream_callback(
-                                {
-                                    "type": "audio_chunk",
-                                    "session_id": self.session_id,
-                                    "audio_data": audio_data,  # Base64编码的音频数据
-                                    "chunk_index": total_chunks,
-                                    "timestamp": time.time(),
-                                }
+                            # 然后发送结束请求到TTS服务器
+                            end_request = json.dumps(
+                                {"task": "tts", "signal": "end", "session": session}
                             )
+                            await ws.send(end_request)
 
-                except Exception as e:
-                    print(f"Error receiving TTS data: {e}")
-                    break
+                            return {
+                                "status": "completed",
+                                "total_time": total_time,
+                                "total_chunks": total_chunks,
+                                "first_chunk_time": first_chunk_time,
+                            }
 
+                        elif status == 1:  # 音频数据
+                            if first_chunk_time is None:
+                                first_chunk_time = time.time() - start_time
+
+                            audio_data = message["audio"]
+                            total_chunks += 1
+
+                            # 通过回调函数发送音频数据到客户端
+                            if self.stream_callback:
+                                await self.stream_callback(
+                                    {
+                                        "type": "audio_chunk",
+                                        "session_id": self.session_id,
+                                        "audio_data": audio_data,  # Base64编码的音频数据
+                                        "chunk_index": total_chunks,
+                                        "timestamp": time.time(),
+                                    }
+                                )
+
+                    except Exception as e:
+                        logger.error("Error receiving TTS data: %s", e)
+                        break
+        except Exception as e:
+            logger.error("TTS websocket connection failed for %s: %s", url, e)
+            return {"status": "error", "message": f"TTS 服务连接失败: {e}"}
         return {"status": "error", "message": "Connection closed unexpectedly"}
 
 

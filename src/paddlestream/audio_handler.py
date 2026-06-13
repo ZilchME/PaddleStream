@@ -1,18 +1,20 @@
 import base64
 import json
-import logging
 import time
 import asyncio
+from pathlib import Path
 
 import numpy as np
 import requests
 import soundfile
 import websockets
 import queue
-import os
-import wave
 
 from datetime import datetime
+
+from .logging_utils import get_logger
+
+logger = get_logger("paddlestream.audio")
 
 class TextHttpHandler:
     def __init__(
@@ -37,7 +39,7 @@ class TextHttpHandler:
             self.url = (
                 "http://" + self.server_ip + ":" + str(self.port) + "/paddlespeech/text"
             )
-        print(f"endpoint: {self.url}")
+        logger.info("TextHttpHandler endpoint: %s", self.url)
 
     def run(self, text):
         """Call the text server to process the specific text
@@ -60,8 +62,7 @@ class TextHttpHandler:
             response_dict = res.json()
             punc_text = response_dict["result"]["punc_text"]
         except Exception as e:
-            print(f"Call punctuation {self.url} occurs error")
-            print(e)
+            logger.error("Call punctuation %s failed: %s", self.url, e)
             punc_text = text
 
         return punc_text
@@ -104,41 +105,28 @@ class WebSocketAudioHandler:
                 continue
 
     def save_audio_to_file(self, filename=None, output_dir="audio_files"):
-        """保存音频数据到文件"""
+        """保存接收到的音频缓冲到 WAV 文件。
+
+        Args:
+            filename: 文件名或文件名 stem。未提供时自动生成时间戳文件名。
+            output_dir: 输出目录。
+
+        Returns:
+            保存成功时返回文件路径字符串，否则返回 None。
+        """
         if not self.audio_data_buffer:
-            print("没有音频数据可保存")
+            logger.warning("没有音频数据可保存")
             return None
 
-        # 创建输出目录
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-
-        # 生成文件名
-        if filename is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"audio_{timestamp}.wav"
-
-        # 确保文件名以.wav结尾
-        if not filename.endswith(".wav"):
-            filename += ".wav"
-
-        filepath = os.path.join(output_dir, filename)
-
         try:
-            # 合并所有音频数据
-            complete_audio = np.concatenate(self.audio_data_buffer)
-
-            # 保存为WAV文件
-            soundfile.write(
-                filepath, complete_audio, self.sample_rate, subtype="PCM_16"
-            )
-
-            print(f"音频文件已保存: {filepath}")
-            print(f"音频长度: {len(complete_audio) / self.sample_rate:.2f} 秒")
-            return filepath
-
+            output_path = _resolve_output_path(filename, output_dir)
+            complete_audio = np.concatenate(self.audio_data_buffer).astype(np.int16)
+            _write_wav_file(output_path, complete_audio, self.sample_rate)
+            logger.info("音频文件已保存: %s", output_path)
+            logger.info("音频长度: %.2f 秒", len(complete_audio) / self.sample_rate)
+            return str(output_path)
         except Exception as e:
-            print(f"保存音频文件失败: {e}")
+            logger.error("保存音频文件失败: %s", e)
             return None
 
 
@@ -183,7 +171,7 @@ class ASRWsAudioHandler:
             punc_server_ip, punc_server_port, timeout=punc_request_timeout
         )
         self.is_server_available = False
-        print(f"endpoint: {self.url}")
+        logger.info("ASR endpoint: %s", self.url)
 
     async def health_check(self) -> bool:
         """Check if the ASR server is reachable by attempting a WebSocket connection.
@@ -192,7 +180,7 @@ class ASRWsAudioHandler:
             bool: True if server is available, False otherwise.
         """
         if self.url is None:
-            print("[ASR Health Check] URL is not configured")
+            logger.warning("[ASR Health Check] URL is not configured")
             return False
         try:
             async with websockets.connect(self.url, ping_interval=None, ping_timeout=10):
@@ -200,7 +188,7 @@ class ASRWsAudioHandler:
                 return True
         except Exception as e:
             self.is_server_available = False
-            print(f"[ASR Health Check] Server unavailable: {e}")
+            logger.warning("[ASR Health Check] Server unavailable: %s", e)
             return False
 
     async def run_websocket_audio(
@@ -211,7 +199,7 @@ class ASRWsAudioHandler:
         包含服务健康检查和重试机制，当 ASR 服务不可用时抛出 ASRServiceNotAvailableError。
         """
         if self.url is None:
-            print("[ASR Fallback] No asr server configured, please input valid ip and port")
+            logger.error("[ASR Fallback] No asr server configured, please input valid ip and port")
             raise ASRServiceNotAvailableError("ASR服务未配置，请检查配置文件中的 ASR_SERVER_CONFIG")
         if self.punc_server.server_ip is not None and self.punc_server.port is not None and self.punc_server.timeout is None:
             raise ASRServiceNotAvailableError("标点服务请求超时未配置，请设置 PADDLESTREAM_SYNC_HTTP_TIMEOUT_SECONDS")
@@ -240,10 +228,10 @@ class ASRWsAudioHandler:
             )
             await ws.send(audio_info)
             msg = await ws.recv()
-            print(f"server: {msg}")
+            logger.info("ASR server: %s", msg)
 
             # 发送音频数据
-            print("开始处理WebSocket音频数据...")
+            logger.info("开始处理WebSocket音频数据...")
 
             # 用于检测静音的变量
             last_result = None
@@ -263,7 +251,7 @@ class ASRWsAudioHandler:
                     msg = await asyncio.wait_for(ws.recv(), timeout=0.1)
                     msg = json.loads(msg)
                     current_result = msg.get("result", "")
-                    print("client receive msg={}".format(msg))
+                    logger.debug("client receive msg=%s", msg)
 
                     if real_time_callback and current_result:
                         real_time_callback(current_result, msg.get("type", "partial"))
@@ -273,8 +261,9 @@ class ASRWsAudioHandler:
                         if last_result_time is None:
                             last_result_time = time.time()
                         elif time.time() - last_result_time >= silence_timeout:
-                            print(
-                                f"No speech detected for {silence_timeout} seconds, closing connection."
+                            logger.info(
+                                "No speech detected for %s seconds, closing connection.",
+                                silence_timeout,
                             )
                             break
                     else:
@@ -305,8 +294,8 @@ class ASRWsAudioHandler:
 
             # 计算处理时间
             elapsed_time = time.time() - start_time
-            print(f"elapsed time: {elapsed_time}")
-            print(f"final result: {msg['result']}")
+            logger.info("elapsed time: %s", elapsed_time)
+            logger.info("final result: %s", msg["result"])
 
             return msg
 
@@ -356,7 +345,7 @@ class TTSWsHandler:
                 raise RuntimeError(
                     f"Failed to fetch TTS sample rate from {self.url_get_sr}: {e}"
                 ) from e
-        print(f"endpoint: {self.url}")
+        logger.info("TTS endpoint: %s", self.url)
 
     async def run(self, text: str, spk_id=0, output: str = None):
         """Send a text to online server
@@ -381,7 +370,7 @@ class TTSWsHandler:
             start_request = json.dumps({"task": "tts", "signal": "start"})
             await ws.send(start_request)
             msg = await ws.recv()
-            print(f"client receive msg={msg}")
+            logger.debug("client receive msg=%s", msg)
             msg = json.loads(msg)
             session = msg["session"]
 
@@ -395,7 +384,7 @@ class TTSWsHandler:
             request = json.dumps(params)
             st = time.time()
             await ws.send(request)
-            logging.debug("send a message to the server")
+            logger.debug("send a message to the server")
 
             # 4. Process the received response
             message = await ws.recv()
@@ -444,7 +433,7 @@ class TTSWsHandler:
                     status = message["status"]
 
                 else:
-                    print("infer error, return status is invalid.")
+                    logger.error("infer error, return status is invalid.")
 
         return (
             first_response,
@@ -457,52 +446,62 @@ class TTSWsHandler:
 
 
 def save_audio(bytes_data, audio_path, sample_rate: int = 24000) -> bool:
-    """save byte to audio file.
+    """将 PCM16 字节流保存为 pcm 或 wav 文件。
 
     Args:
-        bytes_data (bytes): audio samples, bytes format
-        audio_path (str): save audio path
-        sample_rate (int, optional): audio sample rate. Defaults to 24000.
+        bytes_data: PCM16 little-endian 字节流。
+        audio_path: 目标路径，支持 `.pcm` 和 `.wav`。
+        sample_rate: wav 保存时使用的采样率。
 
     Returns:
-        bool: Whether the audio was saved successfully
+        保存成功返回 True，否则返回 False。
     """
+    try:
+        target_path = Path(audio_path).expanduser()
+        suffix = target_path.suffix.lower()
+        if suffix not in {".pcm", ".wav"}:
+            logger.warning("Only supports saved audio format is pcm or wav")
+            return False
 
-    if audio_path.endswith("pcm"):
-        with open(audio_path, "wb") as f:
-            f.write(bytes_data)
-    elif audio_path.endswith("wav"):
-        with open("./tmp.pcm", "wb") as f:
-            f.write(bytes_data)
-        pcm2wav("./tmp.pcm", audio_path, channels=1, bits=16, sample_rate=sample_rate)
-        os.remove("./tmp.pcm")
-    else:
-        print("Only supports saved audio format is pcm or wav")
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if suffix == ".pcm":
+            target_path.write_bytes(bytes_data)
+        else:
+            audio_array = _pcm_bytes_to_int16_array(bytes_data)
+            _write_wav_file(target_path, audio_array, sample_rate)
+        return True
+    except Exception as e:
+        logger.error("保存音频文件失败: %s", e)
         return False
 
-    return True
+
+def _resolve_output_path(filename, output_dir) -> Path:
+    output_dir_path = Path(output_dir).expanduser()
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        filename = f"audio_{timestamp}.wav"
+
+    filename_path = Path(filename)
+    filename_path = filename_path.with_suffix(".wav")
+
+    if filename_path.is_absolute():
+        target_path = filename_path
+    else:
+        target_path = output_dir_path / filename_path
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    return target_path
 
 
-def pcm2wav(pcm_file, wav_file, channels=1, bits=16, sample_rate=16000):
-    """Save the pcm file as a wav file
+def _pcm_bytes_to_int16_array(bytes_data: bytes) -> np.ndarray:
+    if len(bytes_data) % 2 != 0:
+        raise ValueError("PCM16 音频字节长度必须为 2 的倍数")
+    return np.frombuffer(bytes_data, dtype=np.int16)
 
-    Args:
-        pcm_file (str): pcm file path
-        wav_file (str): wav file save path
-        channels (int, optional): audio channel. Defaults to 1.
-        bits (int, optional): Bit depth. Defaults to 16.
-        sample_rate (int, optional): sample rate. Defaults to 16000.
-    """
-    pcmf = open(pcm_file, "rb")
-    pcmdata = pcmf.read()
-    pcmf.close()
 
-    if bits % 8 != 0:
-        print("bits % 8 must == 0. now bits:" + str(bits))
-
-    wavfile = wave.open(wav_file, "wb")
-    wavfile.setnchannels(channels)
-    wavfile.setsampwidth(bits // 8)
-    wavfile.setframerate(sample_rate)
-    wavfile.writeframes(pcmdata)
-    wavfile.close()
+def _write_wav_file(path: Path, audio_array: np.ndarray, sample_rate: int) -> None:
+    if sample_rate is None or sample_rate <= 0:
+        raise ValueError("采样率必须大于 0")
+    soundfile.write(str(path), audio_array.astype(np.int16), sample_rate, subtype="PCM_16")

@@ -7,39 +7,42 @@ from .config import (
     missing_required_config_items,
     optional_config_summary,
 )
+from .logging_utils import get_logger
 from .web_server import socket_app
+
+logger = get_logger("paddlestream.main")
 
 
 def main() -> None:
     missing = missing_required_config_items()
     if missing:
-        print("检测到未配置的必填项，请先完善 `.env`：")
+        logger.error("检测到未配置的必填项，请先完善 `.env`：")
         for key in missing:
-            print(f"- {key}")
-        print("可先复制 `.env.example` 到 `.env`，再逐项填写。")
+            logger.error("- %s", key)
+        logger.error("可先复制 `.env.example` 到 `.env`，再逐项填写。")
         sys.exit(1)
 
     optional = optional_config_summary()
     missing_optional = [key for key, state in optional.items() if state == "missing"]
     if missing_optional:
-        print("以下可选项未配置，对应功能将不可用或需要手动关闭：")
+        logger.warning("以下可选项未配置，对应功能将不可用或需要手动关闭：")
         for key in missing_optional:
-            print(f"- {key}")
+            logger.warning("- %s", key)
 
     try:
-        print("请确保 PaddleSpeech 相关服务器已启动:")
-        print("=" * 50)
+        logger.info("请确保 PaddleSpeech 相关服务器已启动:")
+        logger.info("=" * 50)
         uvicorn.run(
             socket_app,
             host=WEB_SERVER_CONFIG["host"],
             port=WEB_SERVER_CONFIG["port"],
         )
     except ImportError as e:
-        print("错误: 缺少依赖包")
-        print(f"详细错误: {e}")
+        logger.error("错误: 缺少依赖包")
+        logger.error("详细错误: %s", e)
         sys.exit(1)
     except Exception as e:
-        print(f"启动Web服务器失败: {e}")
+        logger.error("启动Web服务器失败: %s", e)
         sys.exit(1)
 
 
