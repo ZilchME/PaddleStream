@@ -6,7 +6,6 @@ import json
 import time
 import http.client
 import codecs
-import os
 import logging
 from urllib.parse import urlparse
 from datetime import datetime
@@ -19,16 +18,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import socketio
-from audio_hander import WebSocketAudioHandler, TextHttpHandler
-from paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
-from session_manager import SessionManager
-from config import (
+from .audio_handler import WebSocketAudioHandler, TextHttpHandler
+from .paddlespeech_client import ASROnlineClientExecutor, TTSWebServerExecutor
+from .session_manager import SessionManager
+from .config import (
     ASR_SERVER_CONFIG,
     TTS_SERVER_CONFIG,
     SOCKETIO_CONFIG,
     SOCKETIO_PATH,
     LLM_API_CONFIG,
     SYNC_HTTP_TIMEOUT_SECONDS,
+    CORRECTION_CONFIG_PATH,
+    PUNC_SERVER_CONFIG,
 )
 
 # ============ 日志配置 ============
@@ -44,14 +45,8 @@ handler.setFormatter(formatter)
 if not logger.handlers:
     logger.addHandler(handler)
 
-# 尝试读取标点服务配置，若不存在则使用默认值
-try:
-    from config import PUNC_SERVER_CONFIG  # type: ignore
-except Exception:
-    PUNC_SERVER_CONFIG = {"default_ip": None, "default_port": None}
-
 # 纠错配置文件路径
-CONFIG_FILE = "correction_config.json"
+CONFIG_FILE = CORRECTION_CONFIG_PATH
 
 # 纠错配置数据模型
 class CorrectionConfig(BaseModel):
@@ -73,10 +68,9 @@ DEFAULT_CORRECTION_CONFIG = {
 # 辅助函数:读取纠错配置
 def load_correction_config() -> dict:
     """从文件加载纠错配置,如果文件不存在则返回默认配置"""
-    if os.path.exists(CONFIG_FILE):
+    if CONFIG_FILE.exists():
         try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         except Exception as e:
             print(f"读取纠错配置文件失败: {e}")
             return DEFAULT_CORRECTION_CONFIG
@@ -86,8 +80,10 @@ def load_correction_config() -> dict:
 def save_correction_config(config: dict) -> bool:
     """保存纠错配置到文件"""
     try:
-        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+        CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(
+            json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         return True
     except Exception as e:
         print(f"保存纠错配置文件失败: {e}")
@@ -117,7 +113,9 @@ socket_app = socketio.ASGIApp(sio, app, socketio_path=SOCKETIO_PATH)
 
 # 全局TTS服务执行器
 tts_executor = TTSWebServerExecutor(
-    server_ip=TTS_SERVER_CONFIG["default_ip"], port=TTS_SERVER_CONFIG["default_port"]
+    server_ip=TTS_SERVER_CONFIG["default_ip"],
+    port=TTS_SERVER_CONFIG["default_port"],
+    endpoint=TTS_SERVER_CONFIG["endpoint"],
 )
 
 # 全局标点服务客户端
@@ -193,8 +191,8 @@ async def update_correction_config(config: CorrectionConfig):
 async def delete_correction_config():
     """删除自定义配置，恢复默认配置"""
     try:
-        if os.path.exists(CONFIG_FILE):
-            os.remove(CONFIG_FILE)
+        if CONFIG_FILE.exists():
+            CONFIG_FILE.unlink()
         return {
             "success": True,
             "message": "已重置为默认配置"
@@ -610,6 +608,7 @@ async def process_asr_async(sid, audio_handler):
                 audio_handler=audio_handler,
                 server_ip=ASR_SERVER_CONFIG["default_ip"],
                 port=ASR_SERVER_CONFIG["default_port"],
+                endpoint=ASR_SERVER_CONFIG["endpoint"],
                 punc_server_ip=PUNC_SERVER_CONFIG.get("default_ip"),
                 punc_server_port=PUNC_SERVER_CONFIG.get("default_port"),
                 request_timeout=SYNC_HTTP_TIMEOUT_SECONDS,
@@ -1029,6 +1028,23 @@ async def send_llm_message(sid, data):
                 room=sid,
             )
             return
+        llm_timeout = None
+        try:
+            if isinstance(LLM_API_CONFIG, dict):
+                llm_timeout = LLM_API_CONFIG.get("timeout")
+        except Exception:
+            llm_timeout = None
+
+        if llm_timeout is None:
+            await sio.emit(
+                "llm_error",
+                {
+                    "error": "未配置LLM API超时时间，请在 .env 中设置 PADDLESTREAM_LLM_API_TIMEOUT",
+                    "session_id": llm_session_id,
+                },
+                room=sid,
+            )
+            return
         # 通知前端开始处理
         await sio.emit("llm_stream_start", {"session_id": llm_session_id}, room=sid)
 
@@ -1038,7 +1054,7 @@ async def send_llm_message(sid, data):
             llm_api_url=llm_api_url,
             input_text=input_text,
             llm_session_id=llm_session_id,
-            timeout=int(LLM_API_CONFIG.get("timeout", 600)) if isinstance(LLM_API_CONFIG, dict) else 600,
+            timeout=llm_timeout,
         )
 
     except Exception as e:
@@ -1051,7 +1067,7 @@ async def _process_llm_sse_stream(
     llm_api_url: str,
     input_text: str,
     llm_session_id: str,
-    timeout: int = 600,
+    timeout: Optional[int] = None,
 ):
     """
     处理LLM的SSE流式响应,模拟前端的处理逻辑
@@ -1075,6 +1091,8 @@ async def _process_llm_sse_stream(
 
         # 在后台线程中执行阻塞的HTTP请求与SSE解析，避免阻塞事件循环
         loop = asyncio.get_running_loop()
+        if timeout is None:
+            raise ValueError("LLM API timeout 未配置，请设置 PADDLESTREAM_LLM_API_TIMEOUT")
 
         # 如果已有同名会话在运行，先请求取消并关闭已有连接
         if session_manager.has_llm_stream(llm_session_id):
@@ -1157,7 +1175,7 @@ def _blocking_sse_post_and_parse(
     on_content: "Callable[[str], None]",
     session_id: Optional[str] = None,
     read_chunk_size: int = 1024,
-    timeout: int = 600,
+    timeout: Optional[int] = None,
 ):
     """
     使用标准库发起POST请求并手动解析SSE流，解析到content即调用 on_content。
@@ -1174,6 +1192,9 @@ def _blocking_sse_post_and_parse(
 
     if not host:
         raise ValueError(f"无效的LLM_API_URL: {llm_api_url}")
+
+    if timeout is None:
+        raise ValueError("LLM API timeout 未配置，请设置 PADDLESTREAM_LLM_API_TIMEOUT")
 
     # 选择连接类型
     if scheme == "https":

@@ -1,9 +1,14 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "paddlestream"
 version = "0.1.0"
-description = "Add your description here"
+description = "Streaming ASR, TTS, and LLM bridge for PaddleSpeech"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = [
     "fastapi>=0.136.3",
     "numpy>=2.4.6",
@@ -13,3 +18,12 @@ dependencies = [
     "uvicorn>=0.48.0",
     "websockets>=16.0",
 ]
+
+[project.scripts]
+paddlestream = "paddlestream.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

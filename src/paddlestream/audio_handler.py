@@ -1,7 +1,6 @@
 import base64
 import json
 import logging
-import threading
 import time
 import asyncio
 
@@ -15,24 +14,18 @@ import wave
 
 from datetime import datetime
 
-try:
-    from config import SYNC_HTTP_TIMEOUT_SECONDS
-except Exception:
-    SYNC_HTTP_TIMEOUT_SECONDS = 10
-
-
 class TextHttpHandler:
     def __init__(
         self,
-        server_ip="127.0.0.1",
-        port=8090,
-        timeout=SYNC_HTTP_TIMEOUT_SECONDS,
+        server_ip=None,
+        port=None,
+        timeout=None,
     ):
         """Text http client request
 
         Args:
-            server_ip (str, optional): the text server ip. Defaults to "127.0.0.1".
-            port (int, optional): the text server port. Defaults to 8090.
+            server_ip (str, optional): the text server ip.
+            port (int, optional): the text server port.
         """
         super().__init__()
         self.server_ip = server_ip
@@ -57,6 +50,8 @@ class TextHttpHandler:
         """
         if self.server_ip is None or self.port is None:
             return text
+        if self.timeout is None:
+            raise ValueError("标点服务请求超时未配置，请设置 PADDLESTREAM_SYNC_HTTP_TIMEOUT_SECONDS")
         request = {
             "text": text,
         }
@@ -157,26 +152,27 @@ class ASRWsAudioHandler:
         self,
         url=None,
         port=None,
-        endpoint="/paddlespeech/asr/streaming",
+        endpoint=None,
         punc_server_ip=None,
         punc_server_port=None,
-        punc_request_timeout=SYNC_HTTP_TIMEOUT_SECONDS,
+        punc_request_timeout=None,
         max_retries=2,
         retry_delay=1.0,
     ):
         """PaddleSpeech Online ASR Server Client  audio handler
            Online asr server use the websocket protocol
         Args:
-            url (str, optional): the server ip. Defaults to None.
-            port (int, optional): the server port. Defaults to None.
+            url (str, optional): the server ip.
+            port (int, optional): the server port.
             endpoint(str, optional): to compatiable with python server and c++ server.
-            punc_server_ip(str, optional): the punctuation server ip. Defaults to None.
-            punc_server_port(int, optional): the punctuation port. Defaults to None
-            max_retries (int, optional): max connection retry times. Defaults to 2.
-            retry_delay (float, optional): retry delay in seconds. Defaults to 1.0.
+            punc_server_ip(str, optional): the punctuation server ip.
+            punc_server_port(int, optional): the punctuation port.
+            max_retries (int, optional): max connection retry times.
+            retry_delay (float, optional): retry delay in seconds.
         """
         self.url = url
         self.port = port
+        self.endpoint = endpoint
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         if url is None or port is None or endpoint is None:
@@ -217,6 +213,8 @@ class ASRWsAudioHandler:
         if self.url is None:
             print("[ASR Fallback] No asr server configured, please input valid ip and port")
             raise ASRServiceNotAvailableError("ASR服务未配置，请检查配置文件中的 ASR_SERVER_CONFIG")
+        if self.punc_server.server_ip is not None and self.punc_server.port is not None and self.punc_server.timeout is None:
+            raise ASRServiceNotAvailableError("标点服务请求超时未配置，请设置 PADDLESTREAM_SYNC_HTTP_TIMEOUT_SECONDS")
 
         # 预检查服务可用性
         if not await self.health_check():
@@ -316,73 +314,49 @@ class ASRWsAudioHandler:
 class TTSWsHandler:
     def __init__(
         self,
-        server="127.0.0.1",
-        port=8092,
-        play: bool = False,
-        sample_rate_timeout: float = SYNC_HTTP_TIMEOUT_SECONDS,
-        sample_rate_fallback: int = 24000,
+        server=None,
+        port=None,
+        endpoint=None,
+        sample_rate_timeout: float = None,
     ):
         """PaddleSpeech Online TTS Server Client  audio handler
            Online tts server use the websocket protocol
         Args:
-            server (str, optional): the server ip. Defaults to "127.0.0.1".
-            port (int, optional): the server port. Defaults to 8092.
-            play (bool, optional): whether to play audio. Defaults False
+            server (str, optional): the server ip.
+            port (int, optional): the server port.
         """
         self.server = server
         self.port = port
+        self.endpoint = endpoint
         self.url = (
-            "ws://" + self.server + ":" + str(self.port) + "/paddlespeech/tts/streaming"
+            None
+            if server is None or port is None or endpoint is None
+            else "ws://" + self.server + ":" + str(self.port) + endpoint
         )
-        self.play = play
 
-        # get model sample rate
-        self.url_get_sr = (
-            "http://"
-            + str(self.server)
-            + ":"
-            + str(self.port)
-            + "/paddlespeech/tts/streaming/samplerate"
-        )
-        self.sample_rate = sample_rate_fallback
-        try:
-            self.sample_rate = requests.get(
-                self.url_get_sr, timeout=sample_rate_timeout
-            ).json().get("sample_rate", sample_rate_fallback)
-        except Exception as e:
-            print(
-                f"Failed to fetch TTS sample rate from {self.url_get_sr}, "
-                f"fallback to {self.sample_rate}: {e}"
+        self.sample_rate = None
+        self.url_get_sr = None
+        if self.url is not None:
+            if sample_rate_timeout is None:
+                raise ValueError(
+                    "TTS 采样率请求超时未配置，请设置 PADDLESTREAM_SYNC_HTTP_TIMEOUT_SECONDS"
+                )
+            self.url_get_sr = (
+                "http://"
+                + str(self.server)
+                + ":"
+                + str(self.port)
+                + f"{endpoint}/samplerate"
             )
-
-        if self.play:
-            import pyaudio
-
-            self.buffer = b""
-            self.p = pyaudio.PyAudio()
-            self.stream = self.p.open(
-                format=self.p.get_format_from_width(2),
-                channels=1,
-                rate=self.sample_rate,
-                output=True,
-            )
-            self.mutex = threading.Lock()
-            self.start_play = True
-            self.t = threading.Thread(target=self.play_audio)
-            self.max_fail = 50
+            try:
+                self.sample_rate = requests.get(
+                    self.url_get_sr, timeout=sample_rate_timeout
+                ).json().get("sample_rate")
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to fetch TTS sample rate from {self.url_get_sr}: {e}"
+                ) from e
         print(f"endpoint: {self.url}")
-
-    def play_audio(self):
-        while True:
-            if not self.buffer:
-                self.max_fail -= 1
-                time.sleep(0.05)
-                if self.max_fail < 0:
-                    break
-            self.mutex.acquire()
-            self.stream.write(self.buffer)
-            self.buffer = b""
-            self.mutex.release()
 
     async def run(self, text: str, spk_id=0, output: str = None):
         """Send a text to online server
@@ -392,6 +366,11 @@ class TTSWsHandler:
             spk_id (int, optional): speaker id. Defaults to 0.
             output (str, optional): client save audio path. Defaults to None.
         """
+        if self.url is None:
+            raise ValueError("TTS 服务未配置，请设置 PADDLESTREAM_TTS_SERVER_IP 和 PADDLESTREAM_TTS_SERVER_PORT")
+        if self.sample_rate is None:
+            raise ValueError("TTS 采样率未配置，请检查 TTS 服务或配置参数")
+
         all_bytes = b""
         receive_time_list = []
         chunk_duration_list = []
@@ -459,13 +438,6 @@ class TTSWsHandler:
                     audio = base64.b64decode(audio)  # bytes
                     chunk_duration_list.append(len(audio) / 2.0 / self.sample_rate)
                     all_bytes += audio
-                    if self.play:
-                        self.mutex.acquire()
-                        self.buffer += audio
-                        self.mutex.release()
-                        if self.start_play:
-                            self.t.start()
-                            self.start_play = False
 
                     message = await ws.recv()
                     message = json.loads(message)
@@ -473,12 +445,6 @@ class TTSWsHandler:
 
                 else:
                     print("infer error, return status is invalid.")
-
-            if self.play:
-                self.t.join()
-                self.stream.stop_stream()
-                self.stream.close()
-                self.p.terminate()
 
         return (
             first_response,

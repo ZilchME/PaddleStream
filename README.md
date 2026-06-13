@@ -1,194 +1,110 @@
-# 流式ASR、TTS服务端
+# PaddleStream
 
-### 简介
+PaddleStream 是一个面向 PaddleSpeech 的流式接入层，用于把 ASR、TTS 和 LLM SSE 能力统一封装成 FastAPI + Socket.IO 服务，方便前端实时交互。
 
-对百度飞桨 [PaddleSpeech](https://github.com/PaddlePaddle/PaddleSpeech/) 服务进行二次封装，支持流式实时语音识别，支持文本逐字输入的流式语音合成。
+> 运行环境要求：Python 3.11 或更高版本。
 
-### 主要功能
+## 主要能力
 
-1. **流式语音识别 (ASR)**: 实时处理音频流并返回识别结果
-2. **流式语音合成 (TTS)**: 支持文本逐字输入的流式语音合成
-3. **LLM 流式对话**: 后端处理 LLM SSE 流式响应,通过 WebSocket 实时转发
-4. **WebSocket 通信**: 基于 Socket.IO 的实时双向通信
+- 流式 ASR 转写，支持实时结果回传
+- 流式 TTS 合成，支持分句缓冲和回调推送
+- LLM SSE 转发，支持流式内容推送和取消
+- 文本标点补全接口
+- 统一的会话管理与配置加载
 
-### 前置服务
+## 快速开始
 
-PaddleSpeech 支持通过服务配置文件作为服务端程序直接启动，本项目基于该服务端运行
-
-```shell
-paddlespeech_server start --config_file application.yaml
-```
-
-配置文件可以参考根目录的 `application.yaml`
-
-可选开启ASR结果的标点补全服务，配置文件参考官方库提供的 demo 即可
-
-```shell
-paddlespeech_server start --config_file conf/punc_application.yaml
-```
-
-### 安装依赖
+1. 安装依赖。
 
 ```bash
 uv sync
 ```
 
-主要依赖:
+1. 准备环境变量。
 
-- fastapi: Web 框架
-- uvicorn: ASGI 服务器
-- python-socketio: WebSocket 支持
+```bash
+cp .env.example .env
+```
+
+1. 启动 PaddleSpeech 服务。
+
+```bash
+paddlespeech_server start --config_file configs/application.yaml
+```
+
+1. 启动 PaddleStream。
+
+```bash
+uv run paddlestream
+```
+
+也可以直接运行：
+
+```bash
+python -m paddlestream
+```
+
+## 配置
+
+运行参数通过 `.env` 配置，缺失时启动会明确提示。
+
+### 必填项
+
+- `PADDLESTREAM_WEB_HOST`
+- `PADDLESTREAM_WEB_PORT`
+- `PADDLESTREAM_ASR_SERVER_IP`
+- `PADDLESTREAM_ASR_SERVER_PORT`
+- `PADDLESTREAM_ASR_SERVER_ENDPOINT`
+- `PADDLESTREAM_TTS_SERVER_IP`
+- `PADDLESTREAM_TTS_SERVER_PORT`
+- `PADDLESTREAM_TTS_SERVER_ENDPOINT`
+- `PADDLESTREAM_SYNC_HTTP_TIMEOUT_SECONDS`
+
+### 可选项
+
+- `PADDLESTREAM_LLM_API_URL`
+- `PADDLESTREAM_LLM_API_TIMEOUT`
+- `PADDLESTREAM_PUNC_SERVER_IP`
+- `PADDLESTREAM_PUNC_SERVER_PORT`
+- `PADDLESTREAM_CORRECTION_CONFIG_PATH`
+- `PADDLESTREAM_PROJECT_DIR`
 
 ### 配置说明
 
-编辑 `config.py` 文件进行配置:
+| 变量 | 说明 |
+| --- | --- |
+| `PADDLESTREAM_PROJECT_DIR` | 指定项目根目录，`.env` 和 `data/` 会从这里解析 |
+| `PADDLESTREAM_CORRECTION_CONFIG_PATH` | 运行时纠错配置路径，默认保存到 `data/correction_config.json` |
+| `PADDLESTREAM_LLM_API_URL` | LLM SSE 地址，不配置则禁用 LLM 流式功能 |
+| `PADDLESTREAM_PUNC_SERVER_IP` / `PADDLESTREAM_PUNC_SERVER_PORT` | 标点服务地址，不配置则直接返回原文 |
 
-```python
-# LLM API 配置 (新增)
-LLM_API_CONFIG = {
-    "url": "http://your-llm-api-url/api/stream",  # 修改为你的LLM API地址
-}
+更多说明见：
 
-# ASR服务器配置
-ASR_SERVER_CONFIG = {
-    "default_ip": "127.0.0.1",
-    "default_port": 8090,
-}
+- [架构说明](docs/architecture.md)
+- [API 与事件](docs/api.md)
+- [部署说明](docs/deployment.md)
+- [LLM 流式说明](docs/llm_websocket_guide.md)
 
-# TTS服务器配置
-TTS_SERVER_CONFIG = {
-    "default_ip": "127.0.0.1",
-    "default_port": 8090,
-}
+## 目录结构
+
+```text
+src/paddlestream/    核心业务代码
+configs/             PaddleSpeech 配置和示例配置
+docs/                架构、API、部署文档
+data/                运行时生成的数据
 ```
 
-### 启动服务
+## 运行时文件
 
-```bash
-python main.py
-```
+- 纠错配置默认写入 `data/correction_config.json`
+- 该文件不会提交到仓库
 
-服务将在 `http://0.0.0.0:8008` 启动。
-服务端口由 `config.py` 中的 `WEB_SERVER_CONFIG` 统一控制。
+## 使用提示
 
-### 事件接口
+- 需要先启动 PaddleSpeech ASR / TTS 服务
+- 如果需要 LLM 流式功能，需要额外配置 `PADDLESTREAM_LLM_API_URL` 和 `PADDLESTREAM_LLM_API_TIMEOUT`
+- 如果需要标点补全，需要额外配置标点服务地址
 
-#### ASR 相关事件
+## License
 
-- `start_asr`: 开始语音识别
-- `audio_data`: 发送音频数据
-- `stop_asr`: 停止语音识别
-- `asr_partial_result`: 接收实时识别结果
-- `asr_result`: 接收最终识别结果
-
-#### TTS 相关事件
-
-- `start_tts`: 基础TTS合成
-- `start_stream_tts`: 开始流式TTS合成
-- `stream_text`: 发送流式文本
-- `flush_tts_buffer`: 清空TTS缓冲区
-- `stop_tts`: 停止TTS合成
-- `tts_stream_audio`: 接收TTS音频流
-
-#### LLM 相关事件
-
-- `send_llm_message`: 发送消息给LLM并接收流式响应
-- `llm_stream_start`: LLM流式响应开始
-- `llm_stream_content`: 接收LLM响应内容片段
-- `llm_stream_complete`: LLM流式响应完成
-- `llm_error`: LLM处理错误
-- `cancel_llm_stream`: 取消LLM流式传输
-
-### 使用示例
-
-### 文本标点接口
-
-提供两种方式为文本添加标点：
-
-- HTTP 接口：
-
-  - 路径：`POST /paddlespeech/text/punctuate`
-  - 请求体：`{"text": "待添加标点的文本"}`
-  - 响应体：`{"result": {"punc_text": "带标点文本"}}`
-
-    示例：
-
-    ```bash
-    curl -X POST \
-        -H 'Content-Type: application/json' \
-        -d '{"text":"你好 我们今天开会讨论方案"}' \
-        http://127.0.0.1:8000/paddlespeech/text/punctuate
-    ```
-
-- Socket.IO 事件：
-
-  - 发送事件：`punctuate`，数据：`{"text": "待添加标点的文本"}`
-  - 接收事件：
-    - 成功：`punctuated`，数据：`{"punc_text": str, "session_id": str}`
-    - 失败：`punctuate_error`，数据：`{"error": str}`
-
-标点服务地址可在 `config.py` 中通过 `PUNC_SERVER_CONFIG = {"default_ip": "127.0.0.1", "default_port": 8090}` 配置；若缺省则使用上述默认值。
-
-#### LLM 流式对话示例
-
-```javascript
-const socket = io('http://localhost:8008');
-
-// 发送消息
-socket.emit('send_llm_message', {
-    input_text: "你好,请介绍一下你自己",
-    session_id: "my-session"
-});
-
-// 接收流式响应
-let fullResponse = '';
-socket.on('llm_stream_content', (data) => {
-    fullResponse += data.content;
-    console.log('收到内容:', data.content);
-});
-
-socket.on('llm_stream_complete', () => {
-    console.log('完整响应:', fullResponse);
-});
-```
-
-#### 完整的对话 + 语音合成示例
-
-```javascript
-// 1. 启动流式TTS
-socket.emit('start_stream_tts', { spk_id: 0 });
-
-// 2. 发送消息给LLM
-socket.emit('send_llm_message', {
-    input_text: "讲一个故事"
-});
-
-// 3. 将LLM响应转发给TTS进行语音合成
-socket.on('llm_stream_content', (data) => {
-    socket.emit('stream_text', { text: data.content });
-});
-
-// 4. LLM完成后刷新TTS缓冲区
-socket.on('llm_stream_complete', () => {
-    socket.emit('flush_tts_buffer');
-});
-```
-
-### 文件说明
-
-- `main.py`: 主入口文件
-- `web_server.py`: WebSocket 服务器实现
-- `config.py`: 配置文件
-- `audio_hander.py`: 音频处理器
-- `paddlespeech_client.py`: PaddleSpeech 客户端
-
-### 架构说明
-
-```
-前端 (HTML/JS)
-    ↓ WebSocket (Socket.IO)
-后端 (FastAPI + Socket.IO)
-    ├─→ PaddleSpeech ASR 服务
-    ├─→ PaddleSpeech TTS 服务
-    └─→ LLM API (SSE流式响应)
-```
+[MIT](LICENSE)

@@ -3,7 +3,7 @@ import json
 import time
 from typing import Callable, Optional
 
-from audio_hander import ASRWsAudioHandler, WebSocketAudioHandler, TTSWsHandler
+from .audio_handler import ASRWsAudioHandler, WebSocketAudioHandler, TTSWsHandler
 
 
 class ASROnlineClientExecutor:
@@ -13,30 +13,37 @@ class ASROnlineClientExecutor:
     def process_websocket_audio(
         self,
         audio_handler: WebSocketAudioHandler,
-        server_ip: str = "127.0.0.1",
-        port: int = 8091,
+        server_ip: str = None,
+        port: int = None,
+        endpoint: str = None,
         punc_server_ip: str = None,
         punc_server_port: str = None,
-        request_timeout: float = 10.0,
+        request_timeout: float = None,
         real_time_callback=None,
     ):
         """处理来自WebSocket的音频数据
 
         Args:
             audio_handler (WebSocketAudioHandler): WebSocket音频处理器
-            server_ip (str, optional): streaming asr server ip. Defaults to "127.0.0.1".
-            port (int, optional): streaming asr server port. Defaults to 8091.
-            punc_server_ip (str, optional): punctuation server ip. Defaults to None.
-            punc_server_port (str, optional): punctuation server port. Defaults to None.
+            server_ip (str, optional): streaming asr server ip.
+            port (int, optional): streaming asr server port.
+            punc_server_ip (str, optional): punctuation server ip.
+            punc_server_port (str, optional): punctuation server port.
 
         Returns:
             str: the audio text
         """
         print("asr websocket client start for web audio")
+        if server_ip is None or port is None:
+            raise ValueError("ASR 服务未配置，请设置 PADDLESTREAM_ASR_SERVER_IP 和 PADDLESTREAM_ASR_SERVER_PORT")
+        if endpoint is None:
+            raise ValueError("ASR WebSocket 路径未配置，请设置 PADDLESTREAM_ASR_SERVER_ENDPOINT")
+        if request_timeout is None:
+            raise ValueError("同步请求超时未配置，请设置 PADDLESTREAM_SYNC_HTTP_TIMEOUT_SECONDS")
         handler = ASRWsAudioHandler(
             url=server_ip,
             port=port,
-            endpoint="/paddlespeech/asr/streaming",
+            endpoint=endpoint,
             punc_server_ip=punc_server_ip,
             punc_server_port=punc_server_port,
             punc_request_timeout=request_timeout,
@@ -66,18 +73,22 @@ class TTSOnlineClientExecutor:
     def __call__(
         self,
         input: str,
-        server_ip: str = "127.0.0.1",
-        port: int = 8090,
+        server_ip: str = None,
+        port: int = None,
+        endpoint: str = None,
         spk_id: int = 0,
         output: str = None,
-        play: bool = False,
     ):
         """
         Python API to call an executor.
         """
-
+        
         print("tts websocket client start")
-        handler = TTSWsHandler(server_ip, port, play)
+        if server_ip is None or port is None:
+            raise ValueError("TTS 服务未配置，请设置 PADDLESTREAM_TTS_SERVER_IP 和 PADDLESTREAM_TTS_SERVER_PORT")
+        if endpoint is None:
+            raise ValueError("TTS WebSocket 路径未配置，请设置 PADDLESTREAM_TTS_SERVER_ENDPOINT")
+        handler = TTSWsHandler(server_ip, port, endpoint)
         loop = asyncio.get_event_loop()
         (
             first_response,
@@ -136,11 +147,11 @@ def compute_delay(receive_time_list, chunk_duration_list):
 class WebTTSSession:
     """Web TTS会话处理类，用于处理单个客户端的TTS请求"""
 
-    def __init__(self, session_id: str, server_ip: str = "127.0.0.1", port: int = 8092):
+    def __init__(self, session_id: str, server_ip: str = None, port: int = None, endpoint: str = None):
         self.session_id = session_id
         self.server_ip = server_ip
         self.port = port
-        self.handler = TTSWsHandler(server_ip, port, play=False)
+        self.endpoint = endpoint
         self.is_processing = False
         self.stream_callback: Optional[Callable] = None
 
@@ -178,7 +189,10 @@ class WebTTSSession:
         """运行流式TTS合成"""
         import websockets
 
-        url = f"ws://{self.server_ip}:{self.port}/paddlespeech/tts/streaming"
+        if self.server_ip is None or self.port is None or self.endpoint is None:
+            raise ValueError("TTS 服务未配置，请设置 PADDLESTREAM_TTS_SERVER_IP、PADDLESTREAM_TTS_SERVER_PORT 和 PADDLESTREAM_TTS_SERVER_ENDPOINT")
+
+        url = f"ws://{self.server_ip}:{self.port}{self.endpoint}"
 
         async with websockets.connect(url) as ws:
             # 发送开始请求
@@ -277,9 +291,10 @@ class WebTTSSession:
 class TTSWebServerExecutor:
     """Web TTS服务执行器，管理多个TTS会话"""
 
-    def __init__(self, server_ip: str = "127.0.0.1", port: int = 8092):
+    def __init__(self, server_ip: str = None, port: int = None, endpoint: str = None):
         self.server_ip = server_ip
         self.port = port
+        self.endpoint = endpoint
         self.sessions = {}  # 存储活跃的TTS会话
 
     def create_session(self, session_id: str) -> WebTTSSession:
@@ -288,7 +303,7 @@ class TTSWebServerExecutor:
             # 如果会话已存在，先清理
             self.remove_session(session_id)
 
-        session = WebTTSSession(session_id, self.server_ip, self.port)
+        session = WebTTSSession(session_id, self.server_ip, self.port, self.endpoint)
         self.sessions[session_id] = session
         return session
 
