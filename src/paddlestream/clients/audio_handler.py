@@ -12,7 +12,7 @@ import queue
 
 from datetime import datetime
 
-from .logging_utils import get_logger
+from ..core.logging_utils import get_logger
 
 logger = get_logger("paddlestream.audio")
 

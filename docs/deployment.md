@@ -41,4 +41,4 @@ python -m paddlestream
 ## 建议
 
 - 生产环境把 `.env` 放到部署系统或 secret 管理中
-- `config.py` 只保留默认值和环境变量解析，不直接写死环境专属参数
+- `config/settings.py` 只保留默认值和环境变量解析，不直接写死环境专属参数

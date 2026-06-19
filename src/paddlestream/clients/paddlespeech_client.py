@@ -4,7 +4,7 @@ import time
 from typing import Callable, Optional
 
 from .audio_handler import ASRWsAudioHandler, WebSocketAudioHandler, TTSWsHandler
-from .logging_utils import get_logger
+from ..core.logging_utils import get_logger
 
 logger = get_logger("paddlestream.client")
 

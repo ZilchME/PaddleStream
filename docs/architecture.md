@@ -4,16 +4,16 @@ PaddleStream 的职责是把 PaddleSpeech 的能力封装成一个更容易接�
 
 ## 组件
 
-- `src/paddlestream/web_server.py`
+- `src/paddlestream/api/server.py`
   - FastAPI + Socket.IO 主入口
   - 对外暴露 HTTP 和 WebSocket 事件
-- `src/paddlestream/paddlespeech_client.py`
+- `src/paddlestream/clients/paddlespeech_client.py`
   - ASR / TTS 的客户端封装
-- `src/paddlestream/audio_handler.py`
+- `src/paddlestream/clients/audio_handler.py`
   - 音频缓冲、PaddleSpeech WebSocket 通信、标点补全调用
-- `src/paddlestream/session_manager.py`
+- `src/paddlestream/core/session_manager.py`
   - 统一管理 ASR、TTS、LLM 会话状态
-- `src/paddlestream/config.py`
+- `src/paddlestream/config/settings.py`
   - 环境变量、`.env`、默认配置加载
 
 ## 数据流
@@ -27,5 +27,5 @@ PaddleStream 的职责是把 PaddleSpeech 的能力封装成一个更容易接�
 
 - 运行时状态不提交到仓库
 - 外部依赖统一超时处理
-- 配置集中在 `.env` 和 `config.py`
+- 配置集中在 `.env` 和 `config/settings.py`
 - 文档、示例、源码分层

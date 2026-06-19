@@ -2,13 +2,13 @@ import sys
 
 import uvicorn
 
-from .config import (
+from .config.settings import (
     WEB_SERVER_CONFIG,
     missing_required_config_items,
     optional_config_summary,
 )
-from .logging_utils import get_logger
-from .web_server import socket_app
+from .core.logging_utils import get_logger
+from .api.server import socket_app
 
 logger = get_logger("paddlestream.main")
 

@@ -88,7 +88,12 @@ python -m paddlestream
 ## 目录结构
 
 ```text
-src/paddlestream/    核心业务代码
+src/paddlestream/    Python 包根目录
+  api/               HTTP 和 Socket.IO 入口
+  clients/           外部服务客户端
+  config/            配置加载
+  core/              通用基础能力
+  services/          业务服务
 configs/             PaddleSpeech 配置和示例配置
 docs/                架构、API、部署文档
 data/                运行时生成的数据
