@@ -38,6 +38,13 @@
 - `asr_partial_result`
 - `asr_result`
 
+`stop_asr` 停止接收新音频，已排队的音频会继续发送到 PaddleSpeech。
+`asr_stopped` 仅确认停止输入；客户端应等待 `asr_result` 获取最终结果。
+收到上游 `signal=finished` 后才返回最终结果，等待期间的中间结果仍通过
+`asr_partial_result` 推送。发送结束信号后默认最多等待 30 秒，超时或连接异常
+通过 `error` 事件报告，不把中间结果当成成功完成。
+识别文本重复不会自动结束会话。
+
 ### TTS
 
 - `start_tts`
@@ -46,6 +53,9 @@
 - `flush_tts_buffer`
 - `stop_tts`
 - `tts_stream_audio`
+
+`start_stream_tts` 的 `max_buffer_size` 默认为 1000，必须是正整数，支持 1、2、3
+等小缓冲值。非法参数通过 `tts_error` 报告，已有 TTS 缓冲会话不受影响。
 
 ### LLM
 

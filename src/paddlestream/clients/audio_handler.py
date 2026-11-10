@@ -146,6 +146,7 @@ class ASRWsAudioHandler:
         punc_request_timeout=None,
         max_retries=2,
         retry_delay=1.0,
+        final_result_timeout=30.0,
     ):
         """PaddleSpeech Online ASR Server Client  audio handler
            Online asr server use the websocket protocol
@@ -157,12 +158,15 @@ class ASRWsAudioHandler:
             punc_server_port(int, optional): the punctuation port.
             max_retries (int, optional): max connection retry times.
             retry_delay (float, optional): retry delay in seconds.
+            final_result_timeout (float, optional): deadline in seconds to receive
+                the finished response after sending the end signal.
         """
         self.url = url
         self.port = port
         self.endpoint = endpoint
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.final_result_timeout = final_result_timeout
         if url is None or port is None or endpoint is None:
             self.url = None
         else:
@@ -233,15 +237,10 @@ class ASRWsAudioHandler:
             # 发送音频数据
             logger.info("开始处理WebSocket音频数据...")
 
-            # 用于检测静音的变量
-            last_result = None
-            last_result_time = None
-            silence_timeout = 3  # 3秒
-
+            final_message = None
+            # 生成器负责排空队列；已取出的最后一块也必须发送。
+            # 重复的识别文本不代表静音，结束以上游 finished 或显式停止为准。
             for chunk_data in audio_handler.read_audio_stream():
-                if not audio_handler.is_receiving and audio_handler.audio_queue.empty():
-                    break
-
                 # 处理音频数据块
                 chunk_data = chunk_data.astype(np.int16)
                 await ws.send(chunk_data.tobytes())
@@ -250,43 +249,46 @@ class ASRWsAudioHandler:
                 try:
                     msg = await asyncio.wait_for(ws.recv(), timeout=0.1)
                     msg = json.loads(msg)
+                    if msg.get("signal") == "finished":
+                        final_message = msg
+                        audio_handler.stop_processing()
+                        break
                     current_result = msg.get("result", "")
                     logger.debug("client receive msg=%s", msg)
 
                     if real_time_callback and current_result:
                         real_time_callback(current_result, msg.get("type", "partial"))
 
-                    # 检查结果是否与上次相同
-                    if current_result and current_result == last_result:
-                        if last_result_time is None:
-                            last_result_time = time.time()
-                        elif time.time() - last_result_time >= silence_timeout:
-                            logger.info(
-                                "No speech detected for %s seconds, closing connection.",
-                                silence_timeout,
-                            )
-                            break
-                    else:
-                        last_result = current_result
-                        last_result_time = None
-
                 except asyncio.TimeoutError:
                     continue
 
-            # 发送结束信号
-            audio_info = json.dumps(
-                {
-                    "name": "websocket_audio",
-                    "signal": "end",
-                    "nbest": 1,
-                },
-                sort_keys=True,
-                indent=4,
-                separators=(",", ": "),
-            )
-            await ws.send(audio_info)
-            msg = await ws.recv()
-            msg = json.loads(msg)
+            if final_message is None:
+                # 排空音频后发送结束信号，跳过积压的 partial，直到收到 finished。
+                audio_info = json.dumps(
+                    {
+                        "name": "websocket_audio",
+                        "signal": "end",
+                        "nbest": 1,
+                    },
+                    sort_keys=True,
+                    indent=4,
+                    separators=(",", ": "),
+                )
+                await ws.send(audio_info)
+                try:
+                    async with asyncio.timeout(self.final_result_timeout):
+                        while final_message is None:
+                            msg = json.loads(await ws.recv())
+                            if msg.get("signal") == "finished":
+                                final_message = msg
+                            elif real_time_callback and msg.get("result"):
+                                real_time_callback(msg["result"], msg.get("type", "partial"))
+                except asyncio.TimeoutError as e:
+                    raise TimeoutError("等待 ASR finished 响应超时") from e
+
+            msg = final_message
+            if not isinstance(msg.get("result"), str):
+                raise ValueError("ASR finished 响应缺少有效的 result 字符串")
 
             # 添加标点
             if self.punc_server and len(msg["result"]) > 0:

@@ -18,6 +18,13 @@ class TTSBufferSession:
         tts_executor,
         logger,
     ):
+        if (
+            isinstance(max_buffer_size, bool)
+            or not isinstance(max_buffer_size, int)
+            or max_buffer_size <= 0
+        ):
+            raise ValueError("max_buffer_size 必须是正整数")
+
         self.session_id = session_id
         self.spk_id = spk_id
         self.max_buffer_size = max_buffer_size
@@ -89,7 +96,7 @@ class TTSBufferSession:
                 sentences.extend(comma_parts[:-1])
                 self.text_buffer = comma_parts[-1]
             else:
-                chunk_size = self.max_buffer_size // 4
+                chunk_size = max(1, self.max_buffer_size // 4)
                 while len(self.text_buffer) > chunk_size:
                     sentences.append(self.text_buffer[:chunk_size])
                     self.text_buffer = self.text_buffer[chunk_size:]
@@ -357,10 +364,6 @@ def register_tts_handlers(sio, session_manager, tts_executor, logger) -> None:
             spk_id = data.get("spk_id", 0)
             max_buffer_size = data.get("max_buffer_size", 1000)
 
-            existing_session = session_manager.pop_tts_buffer_session(sid)
-            if existing_session:
-                existing_session.stop_processing()
-
             buffer_session = TTSBufferSession(
                 session_id=sid,
                 spk_id=spk_id,
@@ -368,6 +371,10 @@ def register_tts_handlers(sio, session_manager, tts_executor, logger) -> None:
                 tts_executor=tts_executor,
                 logger=logger,
             )
+
+            existing_session = session_manager.pop_tts_buffer_session(sid)
+            if existing_session:
+                existing_session.stop_processing()
 
             async def stream_callback(chunk_data):
                 chunk_data["type"] = "stream"
